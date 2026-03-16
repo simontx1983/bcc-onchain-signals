@@ -1,0 +1,15 @@
+{
+    "name": "blue-collar-crypto/bcc-onchain-signals",
+    "description": "On-chain data enrichment and wallet verification for Blue Collar Crypto",
+    "type": "wordpress-plugin",
+    "license": "proprietary",
+    "require": {
+        "php": ">=7.4",
+        "kornrunner/keccak": "^1.1",
+        "simplito/elliptic-php": "^1.0"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}
