@@ -11,4 +11,5 @@ return array(
     'Elliptic\\' => array($vendorDir . '/simplito/elliptic-php/lib'),
     'BN\\' => array($vendorDir . '/simplito/bn-php/lib'),
     'BI\\' => array($vendorDir . '/simplito/bigint-wrapper-php/lib'),
+    'BCC\\Onchain\\' => array($baseDir . '/app'),
 );

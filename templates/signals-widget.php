@@ -16,7 +16,7 @@ $total_bonus = array_sum(array_column($signals, 'score_contribution'));
     </div>
 
     <?php foreach ($signals as $row):
-        $bd = BCC_Onchain_Scorer::breakdown($row);
+        $bd = \BCC\Onchain\Services\SignalScorer::breakdown($row);
         $chain_label = ucfirst($row['chain'] ?? 'Unknown');
         $addr = $row['wallet_address'] ?? '';
         $short_addr = strlen($addr) > 12 ? substr($addr, 0, 6) . '…' . substr($addr, -4) : $addr;

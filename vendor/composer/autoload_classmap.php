@@ -6,6 +6,18 @@ $vendorDir = dirname(__DIR__);
 $baseDir = dirname($vendorDir);
 
 return array(
+    'BCC\\Onchain\\Admin\\SettingsPage' => $baseDir . '/app/Admin/SettingsPage.php',
+    'BCC\\Onchain\\Contracts\\FetcherInterface' => $baseDir . '/app/Contracts/FetcherInterface.php',
+    'BCC\\Onchain\\Controllers\\WalletController' => $baseDir . '/app/Controllers/WalletController.php',
+    'BCC\\Onchain\\Factories\\FetcherFactory' => $baseDir . '/app/Factories/FetcherFactory.php',
+    'BCC\\Onchain\\Fetchers\\CosmosFetcher' => $baseDir . '/app/Fetchers/CosmosFetcher.php',
+    'BCC\\Onchain\\Fetchers\\EvmFetcher' => $baseDir . '/app/Fetchers/EvmFetcher.php',
+    'BCC\\Onchain\\Fetchers\\SolanaFetcher' => $baseDir . '/app/Fetchers/SolanaFetcher.php',
+    'BCC\\Onchain\\Plugin' => $baseDir . '/app/Plugin.php',
+    'BCC\\Onchain\\Repositories\\SignalRepository' => $baseDir . '/app/Repositories/SignalRepository.php',
+    'BCC\\Onchain\\Services\\ChainRefreshService' => $baseDir . '/app/Services/ChainRefreshService.php',
+    'BCC\\Onchain\\Services\\SignalFetcher' => $baseDir . '/app/Services/SignalFetcher.php',
+    'BCC\\Onchain\\Services\\SignalScorer' => $baseDir . '/app/Services/SignalScorer.php',
     'BI\\BigInteger' => $vendorDir . '/simplito/bigint-wrapper-php/lib/BigInteger.php',
     'BN\\BN' => $vendorDir . '/simplito/bn-php/lib/BN.php',
     'BN\\Red' => $vendorDir . '/simplito/bn-php/lib/Red.php',

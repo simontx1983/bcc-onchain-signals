@@ -27,6 +27,7 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         array (
             'BN\\' => 3,
             'BI\\' => 3,
+            'BCC\\Onchain\\' => 12,
         ),
     );
 
@@ -51,9 +52,25 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         array (
             0 => __DIR__ . '/..' . '/simplito/bigint-wrapper-php/lib',
         ),
+        'BCC\\Onchain\\' =>
+        array (
+            0 => __DIR__ . '/../..' . '/app',
+        ),
     );
 
     public static $classMap = array (
+        'BCC\\Onchain\\Admin\\SettingsPage' => __DIR__ . '/../..' . '/app/Admin/SettingsPage.php',
+        'BCC\\Onchain\\Contracts\\FetcherInterface' => __DIR__ . '/../..' . '/app/Contracts/FetcherInterface.php',
+        'BCC\\Onchain\\Controllers\\WalletController' => __DIR__ . '/../..' . '/app/Controllers/WalletController.php',
+        'BCC\\Onchain\\Factories\\FetcherFactory' => __DIR__ . '/../..' . '/app/Factories/FetcherFactory.php',
+        'BCC\\Onchain\\Fetchers\\CosmosFetcher' => __DIR__ . '/../..' . '/app/Fetchers/CosmosFetcher.php',
+        'BCC\\Onchain\\Fetchers\\EvmFetcher' => __DIR__ . '/../..' . '/app/Fetchers/EvmFetcher.php',
+        'BCC\\Onchain\\Fetchers\\SolanaFetcher' => __DIR__ . '/../..' . '/app/Fetchers/SolanaFetcher.php',
+        'BCC\\Onchain\\Plugin' => __DIR__ . '/../..' . '/app/Plugin.php',
+        'BCC\\Onchain\\Repositories\\SignalRepository' => __DIR__ . '/../..' . '/app/Repositories/SignalRepository.php',
+        'BCC\\Onchain\\Services\\ChainRefreshService' => __DIR__ . '/../..' . '/app/Services/ChainRefreshService.php',
+        'BCC\\Onchain\\Services\\SignalFetcher' => __DIR__ . '/../..' . '/app/Services/SignalFetcher.php',
+        'BCC\\Onchain\\Services\\SignalScorer' => __DIR__ . '/../..' . '/app/Services/SignalScorer.php',
         'BI\\BigInteger' => __DIR__ . '/..' . '/simplito/bigint-wrapper-php/lib/BigInteger.php',
         'BN\\BN' => __DIR__ . '/..' . '/simplito/bn-php/lib/BN.php',
         'BN\\Red' => __DIR__ . '/..' . '/simplito/bn-php/lib/Red.php',

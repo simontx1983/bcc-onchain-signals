@@ -2,11 +2,12 @@
 /**
  * Plugin Name: Blue Collar Crypto – On-Chain Signals
  * Description: Enriches BCC trust scores with on-chain data: wallet age, transaction depth, and smart contract deployments (Ethereum & Solana).
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: Blue Collar Labs LLC
  * Text Domain: bcc-onchain
  * Requires at least: 5.8
  * Requires PHP: 8.0
+ * Requires Plugins: bcc-core
  */
 
 if (!defined('ABSPATH')) {
@@ -28,8 +29,13 @@ if (version_compare(PHP_VERSION, '8.0', '<')) {
 // Namespace aliases — compile-time only; classes resolved at call time.
 use BCC\Core\PeepSo\PeepSo;
 use BCC\Core\DB\DB;
+use BCC\Onchain\Repositories\SignalRepository;
+use BCC\Onchain\Services\SignalFetcher;
+use BCC\Onchain\Services\SignalScorer;
+use BCC\Onchain\Services\ChainRefreshService;
+use BCC\Onchain\Admin\SettingsPage;
 
-define('BCC_ONCHAIN_VERSION', '1.2.0');
+define('BCC_ONCHAIN_VERSION', '1.3.0');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 
@@ -95,13 +101,13 @@ register_activation_hook(__FILE__, function () {
     }
 
     // Create this plugin's own tables (no core dependency).
-    BCC_Onchain_DB::install_own_table();
+    SignalRepository::install_own_table();
     bcc_onchain_ensure_schema();
 
     // The onchain_bonus column on the core scores table requires BCC Core
     // to be loaded. If it isn't yet (bulk activation), defer to admin_init.
     if (class_exists('BCC\\Core\\DB\\DB')) {
-        BCC_Onchain_DB::install_bonus_column();
+        SignalRepository::install_bonus_column();
     } else {
         update_option('bcc_onchain_needs_bonus_column', 1);
     }
@@ -113,7 +119,7 @@ register_activation_hook(__FILE__, function () {
 
 register_deactivation_hook(__FILE__, function () {
     wp_clear_scheduled_hook('bcc_onchain_daily_refresh');
-    BCC_Chain_Refresh::deactivate();
+    ChainRefreshService::deactivate();
 });
 
 // ── Boot on plugins_loaded (core deps guaranteed available) ───────────────────
@@ -135,7 +141,7 @@ function bcc_onchain_boot(): void {
     add_action('admin_init', function () {
         // Deferred bonus column creation from bulk activation
         if (get_option('bcc_onchain_needs_bonus_column')) {
-            BCC_Onchain_DB::install_bonus_column();
+            SignalRepository::install_bonus_column();
             delete_option('bcc_onchain_needs_bonus_column');
         }
 
@@ -148,10 +154,10 @@ function bcc_onchain_boot(): void {
 
     // ── Admin settings page ─────────────────────────────────────────────────────
     add_action('admin_menu', function () {
-        BCC_Onchain_Settings::register_page();
+        SettingsPage::register_page();
     }, 20);
     add_action('admin_init', function () {
-        BCC_Onchain_Settings::register_settings();
+        SettingsPage::register_settings();
     });
     add_action('admin_enqueue_scripts', function ($hook) {
         if (strpos($hook, 'bcc-onchain') !== false) {
@@ -191,7 +197,7 @@ function bcc_onchain_boot(): void {
         }
 
         // If we already have a stored row for this wallet, skip the API call.
-        if (BCC_Onchain_DB::get_permanent($address, $chain)) {
+        if (SignalRepository::get_permanent($address, $chain)) {
             return;
         }
 
@@ -202,13 +208,13 @@ function bcc_onchain_boot(): void {
             bcc_onchain_fetch_and_store_wallet($user_id, $page_id, $chain, $address);
         } else {
             // User has no page yet — store the wallet data directly.
-            $signals = BCC_Onchain_Fetcher::fetch($address, $chain);
+            $signals = SignalFetcher::fetch($address, $chain);
             if ($signals !== null) {
-                BCC_Onchain_DB::upsert(array_merge($signals, [
+                SignalRepository::upsert(array_merge($signals, [
                     'user_id'            => $user_id,
                     'wallet_address'     => $address,
                     'chain'              => $chain,
-                    'score_contribution' => BCC_Onchain_Scorer::score($signals),
+                    'score_contribution' => SignalScorer::score($signals),
                 ]));
             }
         }
@@ -265,7 +271,7 @@ function bcc_onchain_boot(): void {
         $page_id = (int) $atts['page_id'] ?: get_the_ID();
         if (!$page_id) return '';
 
-        $signals = BCC_Onchain_DB::get_for_page($page_id);
+        $signals = SignalRepository::get_for_page($page_id);
 
         ob_start();
         include BCC_ONCHAIN_PATH . 'templates/signals-widget.php';
@@ -306,7 +312,7 @@ function bcc_onchain_supported_chains(): array {
 function bcc_onchain_rest_get(WP_REST_Request $req): WP_REST_Response
 {
     $page_id = (int) $req->get_param('page_id');
-    $data    = BCC_Onchain_DB::get_for_page($page_id);
+    $data    = SignalRepository::get_for_page($page_id);
     return rest_ensure_response($data);
 }
 
@@ -336,24 +342,24 @@ function bcc_onchain_fetch_and_store(int $page_id, bool $force = false): array
     }
 
     // Get connected wallets from the trust engine's verifications table
-    $wallets = BCC_Onchain_Fetcher::get_connected_wallets($owner_id);
+    $wallets = SignalFetcher::get_connected_wallets($owner_id);
     $results = [];
 
     foreach ($wallets as $chain => $addresses) {
         foreach ($addresses as $address) {
-            $cached = $force ? null : BCC_Onchain_DB::get_cached($address, $chain);
+            $cached = $force ? null : SignalRepository::get_cached($address, $chain);
 
             if ($cached) {
                 $results[] = $cached;
                 continue;
             }
 
-            $signals = BCC_Onchain_Fetcher::fetch($address, $chain, $force);
+            $signals = SignalFetcher::fetch($address, $chain, $force);
             if ($signals === null) {
                 continue; // API error — skip
             }
 
-            $score = BCC_Onchain_Scorer::score($signals);
+            $score = SignalScorer::score($signals);
             $row   = array_merge($signals, [
                 'user_id'            => $owner_id,
                 'wallet_address'     => $address,
@@ -361,7 +367,7 @@ function bcc_onchain_fetch_and_store(int $page_id, bool $force = false): array
                 'score_contribution' => $score,
             ]);
 
-            BCC_Onchain_DB::upsert($row);
+            SignalRepository::upsert($row);
             $results[] = $row;
         }
     }
@@ -389,17 +395,17 @@ function bcc_onchain_fetch_and_store(int $page_id, bool $force = false): array
  */
 function bcc_onchain_fetch_and_store_wallet(int $user_id, int $page_id, string $chain, string $address, bool $force = false): ?array
 {
-    $cached = $force ? null : BCC_Onchain_DB::get_cached($address, $chain);
+    $cached = $force ? null : SignalRepository::get_cached($address, $chain);
     if ($cached) {
         return $cached;
     }
 
-    $signals = BCC_Onchain_Fetcher::fetch($address, $chain, $force);
+    $signals = SignalFetcher::fetch($address, $chain, $force);
     if ($signals === null) {
         return null;
     }
 
-    $score = BCC_Onchain_Scorer::score($signals);
+    $score = SignalScorer::score($signals);
     $row   = array_merge($signals, [
         'user_id'            => $user_id,
         'wallet_address'     => $address,
@@ -407,10 +413,10 @@ function bcc_onchain_fetch_and_store_wallet(int $user_id, int $page_id, string $
         'score_contribution' => $score,
     ]);
 
-    BCC_Onchain_DB::upsert($row);
+    SignalRepository::upsert($row);
 
     // Recalculate total bonus from all wallets for this page
-    $all_signals = BCC_Onchain_DB::get_for_page($page_id);
+    $all_signals = SignalRepository::get_for_page($page_id);
     $total_bonus = array_sum(array_column($all_signals, 'score_contribution'));
     $total_bonus = min($total_bonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
     bcc_onchain_apply_bonus($page_id, $total_bonus);
