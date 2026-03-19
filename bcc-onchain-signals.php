@@ -104,14 +104,6 @@ register_activation_hook(__FILE__, function () {
     SignalRepository::install_own_table();
     bcc_onchain_ensure_schema();
 
-    // The onchain_bonus column on the core scores table requires BCC Core
-    // to be loaded. If it isn't yet (bulk activation), defer to admin_init.
-    if (class_exists('BCC\\Core\\DB\\DB')) {
-        SignalRepository::install_bonus_column();
-    } else {
-        update_option('bcc_onchain_needs_bonus_column', 1);
-    }
-
     if (!wp_next_scheduled('bcc_onchain_daily_refresh')) {
         wp_schedule_event(time(), 'daily', 'bcc_onchain_daily_refresh');
     }
@@ -139,9 +131,8 @@ function bcc_onchain_boot(): void {
 
     // ── DB upgrade check (runs once per version bump, no re-activation needed) ──
     add_action('admin_init', function () {
-        // Deferred bonus column creation from bulk activation
+        // Clean up legacy option from older versions that managed the bonus column.
         if (get_option('bcc_onchain_needs_bonus_column')) {
-            SignalRepository::install_bonus_column();
             delete_option('bcc_onchain_needs_bonus_column');
         }
 
@@ -426,33 +417,20 @@ function bcc_onchain_fetch_and_store_wallet(int $user_id, int $page_id, string $
 
 /**
  * Apply the on-chain bonus to the stored trust score.
- * We store the bonus separately and ADD it — so re-fetching won't compound.
+ *
+ * Delegates to bcc-trust-engine via ScoreContributorInterface so this
+ * plugin never writes to trust tables directly.
  */
 function bcc_onchain_apply_bonus(int $page_id, float $bonus): void
 {
-    global $wpdb;
+    $contributor = \BCC\Core\ServiceLocator::resolveScoreContributor();
 
-    $table = DB::table('trust_page_scores');
-
-    // Cache column existence check for the lifetime of this request
-    static $col_exists = null;
-    if ($col_exists === null) {
-        $col_exists = (bool) $wpdb->get_var("SHOW COLUMNS FROM {$table} LIKE 'onchain_bonus'");
-    }
-    if (!$col_exists) {
+    if (!$contributor) {
+        error_log('[BCC Onchain] ScoreContributorInterface unavailable — bonus not applied for page ' . $page_id);
         return;
     }
 
-    $result = $wpdb->update(
-        $table,
-        ['onchain_bonus' => round($bonus, 2)],
-        ['page_id' => $page_id],
-        ['%f'], ['%d']
-    );
-
-    if ($result === false) {
-        error_log('[BCC Onchain] Bonus update failed for page ' . $page_id . ': ' . $wpdb->last_error);
-    }
+    $contributor->applyBonus($page_id, 'onchain', $bonus);
 }
 
 /**

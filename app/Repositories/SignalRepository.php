@@ -7,7 +7,6 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Core\PeepSo\PeepSo;
-use BCC\Core\DB\DB;
 
 class SignalRepository
 {
@@ -18,13 +17,11 @@ class SignalRepository
     }
 
     /**
-     * Full install: own table + bonus column on core scores table.
-     * Only safe to call when BCC Core is loaded.
+     * Install this plugin's own table.
      */
     public static function install(): void
     {
         self::install_own_table();
-        self::install_bonus_column();
     }
 
     /**
@@ -57,28 +54,6 @@ class SignalRepository
         dbDelta($sql);
 
         update_option('bcc_onchain_db_version', BCC_ONCHAIN_VERSION);
-    }
-
-    /**
-     * Add onchain_bonus column to the core trust_page_scores table.
-     * Requires BCC Core to be loaded (uses DB::table()).
-     */
-    public static function install_bonus_column(): void
-    {
-        global $wpdb;
-
-        if (!class_exists('BCC\\Core\\DB\\DB')) {
-            return;
-        }
-
-        $scores = DB::table('trust_page_scores');
-        $col    = $wpdb->get_var("SHOW COLUMNS FROM {$scores} LIKE 'onchain_bonus'");
-        if (!$col) {
-            $result = $wpdb->query("ALTER TABLE {$scores} ADD COLUMN onchain_bonus FLOAT NOT NULL DEFAULT 0 AFTER total_score");
-            if ($result === false) {
-                error_log('[BCC Onchain] ALTER TABLE failed for ' . $scores . ': ' . $wpdb->last_error);
-            }
-        }
     }
 
     public static function upsert(array $data): void
