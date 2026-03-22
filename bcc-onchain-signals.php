@@ -26,6 +26,18 @@ if (version_compare(PHP_VERSION, '8.0', '<')) {
     return;
 }
 
+// ── Dependency check — bcc-core must be active ──────────────────────────────
+if ( ! defined( 'BCC_CORE_VERSION' ) ) {
+    add_action( 'admin_notices', function () {
+        echo '<div class="notice notice-error"><p>'
+           . '<strong>BCC On-Chain Signals:</strong> '
+           . 'The <strong>BCC Core</strong> plugin must be activated first. '
+           . 'Please activate BCC Core, then re-activate On-Chain Signals.'
+           . '</p></div>';
+    } );
+    return;
+}
+
 // Namespace aliases — compile-time only; classes resolved at call time.
 use BCC\Core\PeepSo\PeepSo;
 use BCC\Core\DB\DB;
