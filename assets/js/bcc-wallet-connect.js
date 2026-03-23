@@ -281,7 +281,7 @@
             // Matches: .bcc-ecosystem-btn[data-chain] (single-chain ecosystem)
             //          .bcc-chain-picker__go (picker "Connect" button)
             //          .bcc-wallet-connect (legacy / other connect buttons)
-            const btn = e.target.closest('.bcc-ecosystem-btn[data-chain], .bcc-chain-picker__go[data-chain], .bcc-wallet-connect[data-chain]');
+            const btn = e.target.closest('.bcc-ecosystem-btn[data-chain], .bcc-chain-picker__go[data-chain], .bcc-wallet-connect[data-chain], .bcc-wallet-connect-btn[data-chain]');
             if (!btn || btn.disabled) return;
 
             e.preventDefault();

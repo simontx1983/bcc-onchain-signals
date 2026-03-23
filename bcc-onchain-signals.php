@@ -435,7 +435,7 @@ function bcc_onchain_fetch_and_store_wallet(int $user_id, int $page_id, string $
  */
 function bcc_onchain_apply_bonus(int $page_id, float $bonus): void
 {
-    $contributor = \BCC\Core\ServiceLocator::resolveScoreContributor();
+    $contributor = class_exists('\\BCC\\Core\\ServiceLocator') ? \BCC\Core\ServiceLocator::resolveScoreContributor() : null;
 
     if (!$contributor) {
         error_log('[BCC Onchain] ScoreContributorInterface unavailable — bonus not applied for page ' . $page_id);
