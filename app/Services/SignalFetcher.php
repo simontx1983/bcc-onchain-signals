@@ -6,7 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-use BCC\Core\DB\DB;
+use BCC\Core\ServiceLocator;
 
 /**
  * Fetches raw on-chain signals from Etherscan (Ethereum) and Solana public RPC.
@@ -79,27 +79,13 @@ class SignalFetcher
      */
     public static function get_connected_wallets(int $user_id): array
     {
-        global $wpdb;
+        $service = ServiceLocator::resolveWalletVerificationRead();
 
-        $table = DB::table('trust_user_verifications');
-        $rows  = $wpdb->get_results($wpdb->prepare(
-            "SELECT type, provider_username AS address
-             FROM {$table}
-             WHERE user_id = %d
-               AND type IN ('wallet_ethereum', 'wallet_solana', 'wallet_cosmos')
-               AND status = 'active'",
-            $user_id
-        ));
-
-        $wallets = [];
-        foreach ($rows as $r) {
-            $chain = str_replace('wallet_', '', $r->type);
-            if ($r->address) {
-                $wallets[$chain][] = $r->address;
-            }
+        if ($service) {
+            return $service->getWalletsForUser($user_id);
         }
 
-        return $wallets;
+        return [];
     }
 
     // ── Ethereum ──────────────────────────────────────────────────────────────

@@ -40,11 +40,12 @@ if ( ! defined( 'BCC_CORE_VERSION' ) ) {
 
 // Namespace aliases — compile-time only; classes resolved at call time.
 use BCC\Core\PeepSo\PeepSo;
-use BCC\Core\DB\DB;
+use BCC\Core\ServiceLocator;
 use BCC\Onchain\Repositories\SignalRepository;
 use BCC\Onchain\Services\SignalFetcher;
 use BCC\Onchain\Services\SignalScorer;
 use BCC\Onchain\Services\ChainRefreshService;
+use BCC\Onchain\Controllers\WalletController;
 use BCC\Onchain\Admin\SettingsPage;
 
 define('BCC_ONCHAIN_VERSION', '1.3.0');
@@ -67,33 +68,15 @@ if (file_exists($bcc_onchain_autoload)) {
     require_once $bcc_onchain_autoload;
 }
 
-require_once BCC_ONCHAIN_PATH . 'includes/class-bcc-onchain-db.php';
-require_once BCC_ONCHAIN_PATH . 'includes/class-bcc-onchain-fetcher.php';
-require_once BCC_ONCHAIN_PATH . 'includes/class-bcc-onchain-scorer.php';
-require_once BCC_ONCHAIN_PATH . 'includes/class-bcc-onchain-settings.php';
-
 // Database schemas
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-chains.php';
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-wallets.php';
-
-// Chain fetchers (driver pattern)
-require_once BCC_ONCHAIN_PATH . 'includes/fetchers/interface-bcc-fetcher.php';
-require_once BCC_ONCHAIN_PATH . 'includes/fetchers/class-bcc-fetcher-factory.php';
-require_once BCC_ONCHAIN_PATH . 'includes/fetchers/class-bcc-fetcher-cosmos.php';
-require_once BCC_ONCHAIN_PATH . 'includes/fetchers/class-bcc-fetcher-evm.php';
-require_once BCC_ONCHAIN_PATH . 'includes/fetchers/class-bcc-fetcher-solana.php';
 
 // On-chain data tables
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-validators.php';
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-collections.php';
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-dao.php';
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-contracts.php';
-
-// Cron refresh
-require_once BCC_ONCHAIN_PATH . 'includes/class-bcc-chain-refresh.php';
-
-// Wallet connect/verify
-require_once BCC_ONCHAIN_PATH . 'includes/class-bcc-wallet-connect.php';
 
 // Renderers
 require_once BCC_ONCHAIN_PATH . 'includes/renderers/onchain-template-functions.php';
@@ -140,6 +123,25 @@ function bcc_onchain_boot(): void {
         });
         return;
     }
+
+    // ── Expose wallet link data to the ecosystem via bcc-core contract ────────
+    add_filter('bcc.resolve.wallet_link_read', function ($service = null) {
+        if ($service instanceof \BCC\Core\Contracts\WalletLinkReadInterface) {
+            return $service;
+        }
+        return new \BCC\Onchain\Services\WalletLinkReadService();
+    });
+
+    add_filter('bcc.resolve.wallet_link_write', function ($service = null) {
+        if ($service instanceof \BCC\Core\Contracts\WalletLinkWriteInterface) {
+            return $service;
+        }
+        return new \BCC\Onchain\Services\WalletLinkWriteService();
+    });
+
+    // ── Register cron + wallet hooks (single entry point for all init) ────────
+    ChainRefreshService::init();
+    WalletController::init();
 
     // ── DB upgrade check (runs once per version bump, no re-activation needed) ──
     add_action('admin_init', function () {
@@ -194,6 +196,14 @@ function bcc_onchain_boot(): void {
     // Fires once when a user verifies a wallet. Populates on-chain data
     // immediately so the widget is never empty after verification.
     add_action('bcc_wallet_verified', function (int $user_id, string $chain, string $address) {
+        // Per-request guard: prevent double processing if both REST and AJAX
+        // paths fire the hook for the same wallet in a single request.
+        static $processed = [];
+        $key = $user_id . ':' . $chain . ':' . strtolower($address);
+        if (isset($processed[$key])) {
+            return;
+        }
+        $processed[$key] = true;
 
         if (!in_array($chain, bcc_onchain_supported_chains(), true)) {
             return;
@@ -217,7 +227,7 @@ function bcc_onchain_boot(): void {
                     'user_id'            => $user_id,
                     'wallet_address'     => $address,
                     'chain'              => $chain,
-                    'score_contribution' => SignalScorer::score($signals),
+                    'score_contribution' => min(SignalScorer::score($signals), BCC_ONCHAIN_MAX_TOTAL_BONUS),
                 ]));
             }
         }
@@ -225,34 +235,26 @@ function bcc_onchain_boot(): void {
 
     // ── Cron: daily refresh of all pages with wallets ────────────────────────────
     add_action('bcc_onchain_daily_refresh', function () {
-        global $wpdb;
+        $walletService = ServiceLocator::resolveWalletVerificationRead();
+        if (!$walletService) {
+            return;
+        }
 
-        $verif_table  = DB::table('trust_user_verifications');
-        $supported    = bcc_onchain_supported_chains();
-        $wallet_types = array_map(fn($c) => 'wallet_' . $c, $supported);
-        $placeholders = implode(',', array_fill(0, count($wallet_types), '%s'));
-
+        $supported  = bcc_onchain_supported_chains();
         $batch_size = 100;
         $offset     = 0;
         $stagger    = 0;
 
         // Process owners in batches to limit memory usage
         do {
-            $args   = array_merge($wallet_types, [$batch_size, $offset]);
-            $owners = $wpdb->get_col($wpdb->prepare(
-                "SELECT DISTINCT user_id FROM {$verif_table}
-                 WHERE type IN ({$placeholders})
-                   AND status = 'active'
-                 LIMIT %d OFFSET %d",
-                ...$args
-            ));
+            $owners = $walletService->getUserIdsWithWallets($supported, $batch_size, $offset);
 
             if (empty($owners)) {
                 break;
             }
 
             foreach ($owners as $owner_id) {
-                $page_id = bcc_onchain_get_page_for_user((int) $owner_id);
+                $page_id = bcc_onchain_get_page_for_user($owner_id);
 
                 if ($page_id && !wp_next_scheduled('bcc_onchain_refresh_page', [$page_id])) {
                     wp_schedule_single_event(time() + (10 * $stagger), 'bcc_onchain_refresh_page', [$page_id]);
@@ -447,25 +449,22 @@ function bcc_onchain_apply_bonus(int $page_id, float $bonus): void
 
 /**
  * Look up the page_id belonging to a user.
- * Checks trust_page_scores first, falls back to wp_posts for peepso-page CPT.
+ *
+ * @deprecated Use ServiceLocator::resolvePageOwnerResolver()->getPageForOwner() instead.
  *
  * @param int $user_id
  * @return int Page ID, or 0 if not found.
  */
 function bcc_onchain_get_page_for_user(int $user_id): int
 {
-    global $wpdb;
+    $resolver = class_exists('\\BCC\\Core\\ServiceLocator') ? \BCC\Core\ServiceLocator::resolvePageOwnerResolver() : null;
 
-    $scores_table = DB::table('trust_page_scores');
-    $page_id = (int) $wpdb->get_var($wpdb->prepare(
-        "SELECT page_id FROM {$scores_table} WHERE page_owner_id = %d LIMIT 1",
-        $user_id
-    ));
-
-    if ($page_id) {
-        return $page_id;
+    if ($resolver) {
+        return $resolver->getPageForOwner($user_id);
     }
 
+    // Fallback: WP post author lookup only (no trust table access).
+    global $wpdb;
     return (int) $wpdb->get_var($wpdb->prepare(
         "SELECT ID FROM {$wpdb->posts}
          WHERE post_author = %d AND post_type = 'peepso-page' AND post_status = 'publish'

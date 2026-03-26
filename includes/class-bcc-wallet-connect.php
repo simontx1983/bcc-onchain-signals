@@ -11,5 +11,4 @@ if (!defined('ABSPATH')) {
 
 class BCC_Wallet_Connect extends \BCC\Onchain\Controllers\WalletController {}
 
-// Boot hooks — preserved for backward compat.
-BCC_Wallet_Connect::init();
+// init() is now called from bcc_onchain_boot() — the single bootstrap entry point.

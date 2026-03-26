@@ -212,60 +212,17 @@ function bcc_onchain_create_chains_table(): void {
  * @return object|null
  */
 function bcc_onchain_get_chain(string $slug): ?object {
-    global $wpdb;
-    $table = bcc_onchain_chains_table();
-
-    return $wpdb->get_row($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE slug = %s AND is_active = 1 LIMIT 1",
-        $slug
-    ));
+    return \BCC\Onchain\Repositories\ChainRepository::getBySlug($slug);
 }
 
-/**
- * Get a chain row by ID.
- *
- * @param int $chain_id
- * @return object|null
- */
 function bcc_onchain_get_chain_by_id(int $chain_id): ?object {
-    global $wpdb;
-    $table = bcc_onchain_chains_table();
-
-    return $wpdb->get_row($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE id = %d LIMIT 1",
-        $chain_id
-    ));
+    return \BCC\Onchain\Repositories\ChainRepository::getById($chain_id);
 }
 
-/**
- * Get all active chains, optionally filtered by type.
- *
- * @param string|null $chain_type Filter by type (evm, cosmos, solana, near).
- * @return array
- */
 function bcc_onchain_get_active_chains(?string $chain_type = null): array {
-    global $wpdb;
-    $table = bcc_onchain_chains_table();
-
-    if ($chain_type) {
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$table} WHERE is_active = 1 AND chain_type = %s ORDER BY name ASC",
-            $chain_type
-        ));
-    }
-
-    return $wpdb->get_results(
-        "SELECT * FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC"
-    );
+    return \BCC\Onchain\Repositories\ChainRepository::getActive($chain_type);
 }
 
-/**
- * Resolve a chain slug to its ID. Returns null if not found.
- *
- * @param string $slug
- * @return int|null
- */
 function bcc_onchain_resolve_chain_id(string $slug): ?int {
-    $chain = bcc_onchain_get_chain($slug);
-    return $chain ? (int) $chain->id : null;
+    return \BCC\Onchain\Repositories\ChainRepository::resolveId($slug);
 }

@@ -11,5 +11,4 @@ if (!defined('ABSPATH')) {
 
 class BCC_Chain_Refresh extends \BCC\Onchain\Services\ChainRefreshService {}
 
-// Register cron handlers at init — preserved for backward compat.
-BCC_Chain_Refresh::init();
+// init() is now called from bcc_onchain_boot() — the single bootstrap entry point.

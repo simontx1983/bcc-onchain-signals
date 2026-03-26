@@ -10,18 +10,16 @@ use BCC\Core\PeepSo\PeepSo;
 
 class SignalRepository
 {
+    /** @var string Object-cache group. */
+    private const CACHE_GROUP = 'bcc_onchain_signals';
+
+    /** @var int Default TTL in seconds (6 hours). Filterable via bcc_onchain_signal_cache_ttl. */
+    private const DEFAULT_TTL = 6 * HOUR_IN_SECONDS;
+
     public static function table(): string
     {
         global $wpdb;
         return $wpdb->prefix . 'bcc_onchain_signals';
-    }
-
-    /**
-     * Install this plugin's own table.
-     */
-    public static function install(): void
-    {
-        self::install_own_table();
     }
 
     /**
@@ -90,6 +88,8 @@ class SignalRepository
 
         if ($result === false) {
             error_log('[BCC Onchain] Upsert failed for ' . $data['wallet_address'] . ' on ' . $data['chain'] . ': ' . $wpdb->last_error);
+        } else {
+            self::invalidateUser((int) $data['user_id']);
         }
     }
 
@@ -131,20 +131,72 @@ class SignalRepository
 
     /**
      * Get all on-chain signals for all wallets belonging to the page owner.
+     *
+     * Results are served from object cache (per-request, persistent with Redis)
+     * backed by a transient (cross-request on vanilla WP). The cache is keyed
+     * by owner user_id and invalidated automatically on upsert().
      */
     public static function get_for_page(int $page_id): array
     {
-        global $wpdb;
-        $table = self::table();
-
         $owner_id = PeepSo::get_page_owner($page_id);
         if (!$owner_id) {
             return [];
         }
 
-        return $wpdb->get_results(
-            $wpdb->prepare("SELECT * FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC", $owner_id),
+        return self::getByUser($owner_id);
+    }
+
+    /**
+     * Get all signals for a user, with two-tier caching.
+     */
+    public static function getByUser(int $userId): array
+    {
+        $cache_key     = 'signals_user_' . $userId;
+        $transient_key = 'bcc_signals_u' . $userId;
+
+        // 1. Object cache (fastest).
+        $cached = wp_cache_get($cache_key, self::CACHE_GROUP);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        // 2. Transient (cross-request fallback without persistent object cache).
+        $transient = get_transient($transient_key);
+        if (is_array($transient)) {
+            wp_cache_set($cache_key, $transient, self::CACHE_GROUP, self::ttl());
+            return $transient;
+        }
+
+        // 3. DB query on cache miss.
+        global $wpdb;
+        $table = self::table();
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare("SELECT * FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC", $userId),
             ARRAY_A
         ) ?: [];
+
+        $ttl = self::ttl();
+        wp_cache_set($cache_key, $rows, self::CACHE_GROUP, $ttl);
+        set_transient($transient_key, $rows, $ttl);
+
+        return $rows;
+    }
+
+    /**
+     * Invalidate cached signals for a user.
+     *
+     * Called automatically from upsert(). Also safe to call manually
+     * from cron handlers or admin tools.
+     */
+    public static function invalidateUser(int $userId): void
+    {
+        wp_cache_delete('signals_user_' . $userId, self::CACHE_GROUP);
+        delete_transient('bcc_signals_u' . $userId);
+    }
+
+    private static function ttl(): int
+    {
+        return (int) apply_filters('bcc_onchain_signal_cache_ttl', self::DEFAULT_TTL);
     }
 }

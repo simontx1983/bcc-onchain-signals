@@ -214,30 +214,152 @@ class CosmosFetcher implements FetcherInterface
             return null;
         }
 
-        $signing_infos = $this->lcdGet('/cosmos/slashing/v1beta1/signing_infos', [
-            'pagination.limit' => 200,
-        ]);
-
-        if (!$signing_infos || empty($signing_infos['info'])) {
+        // Derive the valcons address from the consensus pubkey so we can
+        // match against the signing_infos "address" field.
+        // Cosmos SDK: valcons_address = bech32(prefix + "valcons", SHA256(pubkey)[:20])
+        $cons_address = $this->deriveConsensusAddress($cons_key, $val['operator_address'] ?? '');
+        if (!$cons_address) {
             return null;
         }
 
-        $missed = null;
-        foreach ($signing_infos['info'] as $info) {
-            if (isset($info['address']) && $info['address'] === ($val['operator_address'] ?? '')) {
-                $missed = (int) ($info['missed_blocks_counter'] ?? 0);
-                break;
-            }
-        }
+        // Use the single-validator signing info endpoint (no pagination needed).
+        $signing_info = $this->lcdGet("/cosmos/slashing/v1beta1/signing_infos/{$cons_address}");
 
-        if ($missed === null) {
+        if (!$signing_info || !isset($signing_info['val_signing_info'])) {
             return null;
         }
+
+        $missed = (int) ($signing_info['val_signing_info']['missed_blocks_counter'] ?? 0);
 
         $window = 10000;
         $uptime = round((1 - ($missed / $window)) * 100, 2);
 
         return max(0, min(100, $uptime));
+    }
+
+    /**
+     * Derive the bech32 consensus address (valcons) from a base64-encoded
+     * ed25519 consensus pubkey.
+     *
+     * Cosmos SDK derivation:
+     *   1. base64_decode(pubkey) → 32 raw bytes
+     *   2. SHA-256 hash → 32 bytes
+     *   3. Take first 20 bytes (the "address bytes")
+     *   4. Bech32-encode with "{chain_prefix}valcons" HRP
+     */
+    private function deriveConsensusAddress(string $base64PubKey, string $operatorAddress): ?string
+    {
+        $raw = base64_decode($base64PubKey, true);
+        if ($raw === false || strlen($raw) !== 32) {
+            return null;
+        }
+
+        // SHA-256 hash, take first 20 bytes (standard Cosmos address derivation)
+        $hash = hash('sha256', $raw, true);
+        $addr_bytes = substr($hash, 0, 20);
+
+        // Derive the valcons HRP from the operator address.
+        // e.g. cosmosvaloper1... → cosmos, osmovaloper1... → osmo
+        $hrp = $this->getValconsHrp($operatorAddress);
+        if (!$hrp) {
+            return null;
+        }
+
+        return $this->bech32Encode($hrp, $addr_bytes);
+    }
+
+    /**
+     * Extract the valcons HRP from an operator address.
+     * cosmosvaloper1... → cosmosvalcons
+     * osmovaloper1...   → osmovalcons
+     */
+    private function getValconsHrp(string $operatorAddress): ?string
+    {
+        $pos = strpos($operatorAddress, 'valoper1');
+        if ($pos === false) {
+            return null;
+        }
+        return substr($operatorAddress, 0, $pos) . 'valcons';
+    }
+
+    // ── Bech32 encoding (self-contained, matches WalletController) ───────
+
+    private function bech32Encode(string $hrp, string $data): string
+    {
+        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+        $values = $this->convertBits(array_values(unpack('C*', $data)), 8, 5, true);
+        if ($values === null) {
+            return '';
+        }
+
+        $polymod = $this->bech32Polymod(array_merge(
+            $this->bech32HrpExpand($hrp),
+            $values,
+            [0, 0, 0, 0, 0, 0]
+        )) ^ 1;
+
+        $checksum = [];
+        for ($i = 0; $i < 6; $i++) {
+            $checksum[] = ($polymod >> (5 * (5 - $i))) & 31;
+        }
+
+        $result = $hrp . '1';
+        foreach (array_merge($values, $checksum) as $v) {
+            $result .= $charset[$v];
+        }
+
+        return $result;
+    }
+
+    private function bech32Polymod(array $values): int
+    {
+        $gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+        $chk = 1;
+        foreach ($values as $v) {
+            $b = $chk >> 25;
+            $chk = (($chk & 0x1ffffff) << 5) ^ $v;
+            for ($i = 0; $i < 5; $i++) {
+                $chk ^= (($b >> $i) & 1) ? $gen[$i] : 0;
+            }
+        }
+        return $chk;
+    }
+
+    private function bech32HrpExpand(string $hrp): array
+    {
+        $expand = [];
+        for ($i = 0; $i < strlen($hrp); $i++) {
+            $expand[] = ord($hrp[$i]) >> 5;
+        }
+        $expand[] = 0;
+        for ($i = 0; $i < strlen($hrp); $i++) {
+            $expand[] = ord($hrp[$i]) & 31;
+        }
+        return $expand;
+    }
+
+    private function convertBits(array $data, int $fromBits, int $toBits, bool $pad = true): ?array
+    {
+        $acc    = 0;
+        $bits   = 0;
+        $result = [];
+        $maxv   = (1 << $toBits) - 1;
+
+        foreach ($data as $value) {
+            $acc = ($acc << $fromBits) | $value;
+            $bits += $fromBits;
+            while ($bits >= $toBits) {
+                $bits -= $toBits;
+                $result[] = ($acc >> $bits) & $maxv;
+            }
+        }
+
+        if ($pad && $bits > 0) {
+            $result[] = ($acc << ($toBits - $bits)) & $maxv;
+        }
+
+        return $result;
     }
 
     private function fetchSelfDelegation(string $valoper): ?float

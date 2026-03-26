@@ -71,36 +71,10 @@ function bcc_onchain_create_dao_tables(): void {
 }
 
 function bcc_onchain_get_dao_stats_for_project(int $post_id): array {
-    global $wpdb;
-    $table   = bcc_onchain_dao_stats_table();
-    $wallets = bcc_onchain_wallet_links_table();
-    $chains  = bcc_onchain_chains_table();
-
-    return $wpdb->get_results($wpdb->prepare(
-        "SELECT d.*, c.slug AS chain_slug, c.name AS chain_name
-         FROM {$table} d
-         JOIN {$wallets} w ON w.id = d.wallet_link_id
-         JOIN {$chains} c ON c.id = d.chain_id
-         WHERE w.post_id = %d
-         ORDER BY d.total_proposals DESC",
-        $post_id
-    )) ?: [];
+    return \BCC\Onchain\Repositories\DaoRepository::getStatsForProject($post_id);
 }
 
 function bcc_onchain_get_treasury_for_dao(int $dao_stat_id): array {
-    global $wpdb;
-    $table = bcc_onchain_treasury_table();
-
-    return $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE dao_stat_id = %d ORDER BY usd_value DESC",
-        $dao_stat_id
-    )) ?: [];
+    return \BCC\Onchain\Repositories\DaoRepository::getTreasuryForDao($dao_stat_id);
 }
 
-function bcc_onchain_get_expired_dao_stats(int $limit = 50): array {
-    global $wpdb;
-    $table = bcc_onchain_dao_stats_table();
-    return $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT %d", $limit
-    ));
-}

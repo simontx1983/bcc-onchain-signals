@@ -15,10 +15,7 @@ if (!defined('ABSPATH')) {
  *  3. Server verifies signature → inserts wallet_link row → marks verified
  *  4. CRUD: list, set-primary, disconnect
  *
- * Signature verification is chain-type specific:
- *  - EVM:    ecrecover via elliptic curve (uses Ethereum personal_sign)
- *  - Cosmos: amino signature verification
- *  - Solana: ed25519 signature verification
+ * Signature verification delegates to \BCC\Core\Crypto\WalletVerifier.
  */
 class WalletController
 {
@@ -133,11 +130,11 @@ class WalletController
                 . ' sig_starts=' . substr($signature, 0, 50));
         }
 
-        $valid = self::verify_signature(
+        $valid = \BCC\Core\Crypto\WalletVerifier::verify(
             $chain->chain_type,
-            $wallet_address,
             $challenge['message'],
-            $signature
+            $signature,
+            $wallet_address
         );
 
         if (!$valid) {
@@ -320,156 +317,7 @@ class WalletController
     }
 
     // ── Signature Verification ───────────────────────────────────────────────
-
-    /**
-     * Verify a wallet signature based on chain type.
-     */
-    public static function verify_signature(string $chain_type, string $address, string $message, string $signature): bool
-    {
-        switch ($chain_type) {
-            case 'evm':
-                return self::verifyEvmSignature($address, $message, $signature);
-            case 'cosmos':
-                return self::verifyCosmosSignature($address, $message, $signature);
-            case 'solana':
-                return self::verifySolanaSignature($address, $message, $signature);
-            default:
-                return false;
-        }
-    }
-
-    /**
-     * Verify an EVM personal_sign signature.
-     */
-    private static function verifyEvmSignature(string $address, string $message, string $signature): bool
-    {
-        if (!class_exists('Elliptic\EC')) {
-            error_log('BCC Wallet Connect: elliptic-php not installed. Run: composer install');
-            return false;
-        }
-
-        $prefixed = "\x19Ethereum Signed Message:\n" . strlen($message) . $message;
-        $hash     = self::keccak256($prefixed);
-
-        $sig = self::hexDecode($signature);
-        if (strlen($sig) !== 65) {
-            return false;
-        }
-
-        $r = substr($sig, 0, 32);
-        $s = substr($sig, 32, 32);
-        $v = ord($sig[64]);
-
-        if ($v >= 27) {
-            $v -= 27;
-        }
-
-        try {
-            $ec        = new \Elliptic\EC('secp256k1');
-            $publicKey = $ec->recoverPubKey(bin2hex($hash), ['r' => bin2hex($r), 's' => bin2hex($s)], $v);
-
-            $pubHex    = substr($publicKey->encode('hex'), 2);
-            $recovered = '0x' . substr(bin2hex(self::keccak256(hex2bin($pubHex))), -40);
-
-            return strtolower($recovered) === strtolower($address);
-        } catch (\Exception $e) {
-            error_log('BCC Wallet Connect: EVM verify error — ' . $e->getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Verify a Cosmos amino signature (Keplr signAmino).
-     */
-    private static function verifyCosmosSignature(string $address, string $message, string $signature): bool
-    {
-        if (!class_exists('Elliptic\EC')) {
-            error_log('BCC Wallet Connect: elliptic-php not installed. Run: composer install');
-            return false;
-        }
-
-        $payload = json_decode($signature, true);
-        if (!$payload || empty($payload['signature']) || empty($payload['pub_key'])) {
-            error_log('BCC Wallet Connect: Cosmos payload parse failed. json_last_error=' . json_last_error()
-                . ' sig_length=' . strlen($signature)
-                . ' first_100=' . substr($signature, 0, 100));
-            return false;
-        }
-
-        $sig_bytes = base64_decode($payload['signature']);
-        $pub_value = $payload['pub_key']['value'] ?? '';
-        $pub_bytes = base64_decode($pub_value);
-
-        if (strlen($sig_bytes) !== 64 || strlen($pub_bytes) !== 33) {
-            return false;
-        }
-
-        $sign_doc = json_encode([
-            'account_number' => '0',
-            'chain_id'       => '',
-            'fee'            => ['amount' => [], 'gas' => '0'],
-            'memo'           => '',
-            'msgs'           => [[
-                'type'  => 'sign/MsgSignData',
-                'value' => [
-                    'data'   => base64_encode($message),
-                    'signer' => $address,
-                ],
-            ]],
-            'sequence'       => '0',
-        ], JSON_UNESCAPED_SLASHES);
-
-        $hash = hash('sha256', $sign_doc, true);
-
-        try {
-            $ec  = new \Elliptic\EC('secp256k1');
-            $key = $ec->keyFromPublic(bin2hex($pub_bytes), 'hex');
-
-            $r = substr($sig_bytes, 0, 32);
-            $s = substr($sig_bytes, 32, 32);
-
-            $valid = $key->verify(bin2hex($hash), ['r' => bin2hex($r), 's' => bin2hex($s)]);
-
-            if (!$valid) {
-                return false;
-            }
-
-            $sha  = hash('sha256', $pub_bytes, true);
-            $ripe = hash('ripemd160', $sha, true);
-            $derived_address = self::bech32Encode(self::getBech32Prefix($address), $ripe);
-
-            return strtolower($derived_address) === strtolower($address);
-        } catch (\Exception $e) {
-            error_log('BCC Wallet Connect: Cosmos verify error — ' . $e->getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * Verify a Solana ed25519 signature.
-     */
-    private static function verifySolanaSignature(string $address, string $message, string $signature): bool
-    {
-        if (!function_exists('sodium_crypto_sign_verify_detached')) {
-            error_log('BCC Wallet Connect: sodium extension required for Solana verification.');
-            return false;
-        }
-
-        try {
-            $sig_bytes = self::base58Decode($signature);
-            $pub_bytes = self::base58Decode($address);
-            $msg_bytes = $message;
-
-            if (strlen($sig_bytes) !== 64 || strlen($pub_bytes) !== 32) {
-                return false;
-            }
-
-            return sodium_crypto_sign_verify_detached($sig_bytes, $msg_bytes, $pub_bytes);
-        } catch (\Exception $e) {
-            error_log('BCC Wallet Connect: Solana verify error — ' . $e->getMessage());
-            return false;
-        }
-    }
+    // All crypto verification is handled by \BCC\Core\Crypto\WalletVerifier.
 
     // ── Frontend Assets ──────────────────────────────────────────────────────
 
@@ -518,143 +366,6 @@ class WalletController
     private static function challengeKey(int $user_id, string $address): string
     {
         return 'bcc_wallet_challenge_' . $user_id . '_' . md5(strtolower($address));
-    }
-
-    private static function hexDecode(string $hex): string
-    {
-        if (str_starts_with($hex, '0x') || str_starts_with($hex, '0X')) {
-            $hex = substr($hex, 2);
-        }
-
-        $bin = hex2bin($hex);
-
-        return $bin === false ? '' : $bin;
-    }
-
-    private static function base58Decode(string $input): string
-    {
-        $alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-        $base     = strlen($alphabet);
-
-        $num = gmp_init(0);
-        for ($i = 0; $i < strlen($input); $i++) {
-            $pos = strpos($alphabet, $input[$i]);
-            if ($pos === false) {
-                return '';
-            }
-            $num = gmp_add(gmp_mul($num, $base), $pos);
-        }
-
-        $hex = gmp_strval($num, 16);
-        if (strlen($hex) % 2 !== 0) {
-            $hex = '0' . $hex;
-        }
-
-        $leading = 0;
-        for ($i = 0; $i < strlen($input); $i++) {
-            if ($input[$i] !== '1') break;
-            $leading++;
-        }
-
-        return str_repeat("\x00", $leading) . hex2bin($hex);
-    }
-
-    private static function keccak256(string $data): string
-    {
-        if (in_array('keccak256', hash_algos(), true)) {
-            return hash('keccak256', $data, true);
-        }
-
-        if (class_exists('kornrunner\\Keccak')) {
-            return hex2bin(\kornrunner\Keccak::hash($data, 256));
-        }
-
-        error_log('BCC Wallet Connect: No Keccak-256 implementation. Run: composer install');
-        return '';
-    }
-
-    private static function bech32Encode(string $hrp, string $data): string
-    {
-        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-
-        $values = self::convertBits(array_values(unpack('C*', $data)), 8, 5, true);
-        if ($values === null) {
-            return '';
-        }
-
-        $polymod = self::bech32Polymod(array_merge(
-            self::bech32HrpExpand($hrp),
-            $values,
-            [0, 0, 0, 0, 0, 0]
-        )) ^ 1;
-
-        $checksum = [];
-        for ($i = 0; $i < 6; $i++) {
-            $checksum[] = ($polymod >> (5 * (5 - $i))) & 31;
-        }
-
-        $result = $hrp . '1';
-        foreach (array_merge($values, $checksum) as $v) {
-            $result .= $charset[$v];
-        }
-
-        return $result;
-    }
-
-    private static function bech32Polymod(array $values): int
-    {
-        $gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-        $chk = 1;
-        foreach ($values as $v) {
-            $b = $chk >> 25;
-            $chk = (($chk & 0x1ffffff) << 5) ^ $v;
-            for ($i = 0; $i < 5; $i++) {
-                $chk ^= (($b >> $i) & 1) ? $gen[$i] : 0;
-            }
-        }
-        return $chk;
-    }
-
-    private static function bech32HrpExpand(string $hrp): array
-    {
-        $expand = [];
-        for ($i = 0; $i < strlen($hrp); $i++) {
-            $expand[] = ord($hrp[$i]) >> 5;
-        }
-        $expand[] = 0;
-        for ($i = 0; $i < strlen($hrp); $i++) {
-            $expand[] = ord($hrp[$i]) & 31;
-        }
-        return $expand;
-    }
-
-    private static function convertBits(array $data, int $fromBits, int $toBits, bool $pad = true): ?array
-    {
-        $acc    = 0;
-        $bits   = 0;
-        $result = [];
-        $maxv   = (1 << $toBits) - 1;
-
-        foreach ($data as $value) {
-            $acc = ($acc << $fromBits) | $value;
-            $bits += $fromBits;
-            while ($bits >= $toBits) {
-                $bits -= $toBits;
-                $result[] = ($acc >> $bits) & $maxv;
-            }
-        }
-
-        if ($pad && $bits > 0) {
-            $result[] = ($acc << ($toBits - $bits)) & $maxv;
-        }
-
-        return $result;
-    }
-
-    private static function getBech32Prefix(string $address): string
-    {
-        $pos = strrpos($address, '1');
-        return $pos !== false ? substr($address, 0, $pos) : 'cosmos';
     }
 
     private static function getChainsForJs(): array
