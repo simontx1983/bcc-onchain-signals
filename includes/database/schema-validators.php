@@ -14,8 +14,7 @@ if (!defined('ABSPATH')) {
 }
 
 function bcc_onchain_validators_table(): string {
-    global $wpdb;
-    return $wpdb->prefix . 'bcc_onchain_validators';
+    return \BCC\Core\DB\DB::table('onchain_validators');
 }
 
 /**
@@ -58,16 +57,3 @@ function bcc_onchain_create_validators_table(): void {
     dbDelta($sql);
 }
 
-// ── CRUD — delegates to ValidatorRepository ──────────────────────────────────
-
-function bcc_onchain_upsert_validator(array $data, int $wallet_link_id, int $ttl_seconds = 3600) {
-    return \BCC\Onchain\Repositories\ValidatorRepository::upsert($data, $wallet_link_id, $ttl_seconds);
-}
-
-function bcc_onchain_get_validators_for_project(int $post_id, int $page = 1, int $per_page = 8, string $order_by = 'total_stake'): array {
-    return \BCC\Onchain\Repositories\ValidatorRepository::getForProject($post_id, $page, $per_page, $order_by);
-}
-
-function bcc_onchain_get_expired_validators(int $limit = 50): array {
-    return \BCC\Onchain\Repositories\ValidatorRepository::getExpired($limit);
-}

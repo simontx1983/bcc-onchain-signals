@@ -11,8 +11,7 @@ if (!defined('ABSPATH')) {
 }
 
 function bcc_onchain_collections_table(): string {
-    global $wpdb;
-    return $wpdb->prefix . 'bcc_onchain_collections';
+    return \BCC\Core\DB\DB::table('onchain_collections');
 }
 
 function bcc_onchain_create_collections_table(): void {
@@ -35,6 +34,7 @@ function bcc_onchain_create_collections_table(): void {
         listed_percentage DECIMAL(5,2) DEFAULT NULL,
         royalty_percentage DECIMAL(5,2) DEFAULT NULL,
         metadata_storage VARCHAR(30) DEFAULT NULL,
+        show_on_profile TINYINT(1) NOT NULL DEFAULT 1,
         fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME NOT NULL,
         PRIMARY KEY (id),

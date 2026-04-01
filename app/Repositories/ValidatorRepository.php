@@ -2,6 +2,8 @@
 
 namespace BCC\Onchain\Repositories;
 
+use BCC\Core\DB\DB;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -10,8 +12,7 @@ final class ValidatorRepository
 {
     public static function table(): string
     {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_onchain_validators';
+        return DB::table('onchain_validators');
     }
 
     /**

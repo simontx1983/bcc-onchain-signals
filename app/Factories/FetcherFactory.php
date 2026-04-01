@@ -10,6 +10,7 @@ use BCC\Onchain\Contracts\FetcherInterface;
 use BCC\Onchain\Fetchers\EvmFetcher;
 use BCC\Onchain\Fetchers\CosmosFetcher;
 use BCC\Onchain\Fetchers\SolanaFetcher;
+use BCC\Onchain\Repositories\ChainRepository;
 
 /**
  * Chain Fetcher Factory
@@ -28,6 +29,26 @@ class FetcherFactory
         'cosmos' => CosmosFetcher::class,
         'solana' => SolanaFetcher::class,
     ];
+
+    /**
+     * Create a fetcher by chain_id.
+     *
+     * Looks up the chain row from the DB, then delegates to make_for_chain().
+     *
+     * @param int $chainId FK to bcc_chains.id.
+     * @return FetcherInterface
+     * @throws \InvalidArgumentException If chain not found or no driver.
+     */
+    public static function make(int $chainId): FetcherInterface
+    {
+        $chain = ChainRepository::getById($chainId);
+
+        if (!$chain) {
+            throw new \InvalidArgumentException("Chain not found: {$chainId}");
+        }
+
+        return self::make_for_chain($chain);
+    }
 
     /**
      * Create a fetcher from a chain object.
@@ -58,5 +79,4 @@ class FetcherFactory
     {
         return isset(self::$drivers[$chain_type]) && class_exists(self::$drivers[$chain_type]);
     }
-
 }

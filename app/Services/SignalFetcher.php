@@ -79,13 +79,8 @@ class SignalFetcher
      */
     public static function get_connected_wallets(int $user_id): array
     {
-        $service = ServiceLocator::resolveWalletVerificationRead();
-
-        if ($service) {
-            return $service->getWalletsForUser($user_id);
-        }
-
-        return [];
+        // NullWalletVerificationRead::getWalletsForUser() returns [] — same as old fallback.
+        return ServiceLocator::resolveWalletVerificationRead()->getWalletsForUser($user_id);
     }
 
     // ── Ethereum ──────────────────────────────────────────────────────────────

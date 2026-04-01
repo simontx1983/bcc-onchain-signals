@@ -31,26 +31,11 @@ interface FetcherInterface
     /**
      * Fetch NFT collection data for a wallet (collections created by this address).
      *
-     * @param string $address Creator wallet address.
-     * @return array Array of collection data rows.
+     * @param string $walletAddress Creator wallet address.
+     * @param int    $chainId       Chain ID (FK to bcc_chains.id). 0 = use fetcher's chain.
+     * @return array Array of normalized collection data rows.
      */
-    public function fetch_collections(string $address): array;
-
-    /**
-     * Fetch DAO governance stats for a governance contract.
-     *
-     * @param string $contract Governance contract address or DAO identifier.
-     * @return array DAO governance data.
-     */
-    public function fetch_dao_stats(string $contract): array;
-
-    /**
-     * Fetch deployed contracts for a wallet address.
-     *
-     * @param string $address Deployer wallet address.
-     * @return array Array of contract data rows.
-     */
-    public function fetch_contracts(string $address): array;
+    public function fetch_collections(string $walletAddress, int $chainId = 0): array;
 
     /**
      * Get the chain object this fetcher is configured for.

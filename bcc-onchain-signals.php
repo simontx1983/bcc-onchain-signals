@@ -41,7 +41,9 @@ if ( ! defined( 'BCC_CORE_VERSION' ) ) {
 // Namespace aliases — compile-time only; classes resolved at call time.
 use BCC\Core\PeepSo\PeepSo;
 use BCC\Core\ServiceLocator;
+use BCC\Onchain\Repositories\CollectionRepository;
 use BCC\Onchain\Repositories\SignalRepository;
+use BCC\Onchain\Repositories\WalletRepository;
 use BCC\Onchain\Services\SignalFetcher;
 use BCC\Onchain\Services\SignalScorer;
 use BCC\Onchain\Services\ChainRefreshService;
@@ -75,8 +77,7 @@ require_once BCC_ONCHAIN_PATH . 'includes/database/schema-wallets.php';
 // On-chain data tables
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-validators.php';
 require_once BCC_ONCHAIN_PATH . 'includes/database/schema-collections.php';
-require_once BCC_ONCHAIN_PATH . 'includes/database/schema-dao.php';
-require_once BCC_ONCHAIN_PATH . 'includes/database/schema-contracts.php';
+require_once BCC_ONCHAIN_PATH . 'includes/database/schema-claims.php';
 
 // Renderers
 require_once BCC_ONCHAIN_PATH . 'includes/renderers/onchain-template-functions.php';
@@ -102,10 +103,14 @@ register_activation_hook(__FILE__, function () {
     if (!wp_next_scheduled('bcc_onchain_daily_refresh')) {
         wp_schedule_event(time(), 'daily', 'bcc_onchain_daily_refresh');
     }
+    if (!wp_next_scheduled('bcc_onchain_retry_bonus')) {
+        wp_schedule_event(time(), 'hourly', 'bcc_onchain_retry_bonus');
+    }
 });
 
 register_deactivation_hook(__FILE__, function () {
     wp_clear_scheduled_hook('bcc_onchain_daily_refresh');
+    wp_clear_scheduled_hook('bcc_onchain_retry_bonus');
     ChainRefreshService::deactivate();
 });
 
@@ -142,6 +147,12 @@ function bcc_onchain_boot(): void {
     // ── Register cron + wallet hooks (single entry point for all init) ────────
     ChainRefreshService::init();
     WalletController::init();
+
+    // ── Bonus retry cron — processes failed bonus applications hourly ────────
+    add_action('bcc_onchain_retry_bonus', 'bcc_onchain_process_bonus_retries');
+
+    // ── Claim → Trust integration: apply trust bonus when a claim is verified ──
+    add_action('bcc_onchain_claim_verified', 'bcc_onchain_apply_claim_bonus', 10, 4);
 
     // ── DB upgrade check (runs once per version bump, no re-activation needed) ──
     add_action('admin_init', function () {
@@ -231,14 +242,36 @@ function bcc_onchain_boot(): void {
                 ]));
             }
         }
+
+        // Seed NFT collection data on first wallet verification (all chains).
+        // Runs after signal fetch so the wallet_link row exists.
+        $chainObj = \BCC\Onchain\Repositories\ChainRepository::getBySlug($chain);
+        if ($chainObj && \BCC\Onchain\Factories\FetcherFactory::has_driver($chainObj->chain_type)) {
+            $fetcher = \BCC\Onchain\Factories\FetcherFactory::make_for_chain($chainObj);
+            if ($fetcher->supports_feature('collection')) {
+                $wallets = WalletRepository::getForUser($user_id);
+                foreach ($wallets as $w) {
+                    if (strtolower($w->wallet_address) === strtolower($address)) {
+                        $collections = $fetcher->fetch_collections($address, (int) $chainObj->id);
+                        foreach ($collections as $c) {
+                            CollectionRepository::upsert($c, (int) $w->id, 4 * HOUR_IN_SECONDS);
+                        }
+                        if (!empty($collections) && (int) $w->post_id > 0) {
+                            \BCC\Onchain\Services\CollectionService::invalidate((int) $w->post_id);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
     }, 10, 3);
 
     // ── Cron: daily refresh of all pages with wallets ────────────────────────────
     add_action('bcc_onchain_daily_refresh', function () {
+        // Also process any pending bonus retries from failed applications.
+        bcc_onchain_process_bonus_retries();
+
         $walletService = ServiceLocator::resolveWalletVerificationRead();
-        if (!$walletService) {
-            return;
-        }
 
         $supported  = bcc_onchain_supported_chains();
         $batch_size = 100;
@@ -295,8 +328,7 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_wallet_links_table();
     bcc_onchain_create_validators_table();
     bcc_onchain_create_collections_table();
-    bcc_onchain_create_dao_tables();
-    bcc_onchain_create_contracts_table();
+    bcc_onchain_create_claims_table();
 }
 
 // ── Supported chains ──────────────────────────────────────────────────────────
@@ -430,21 +462,205 @@ function bcc_onchain_fetch_and_store_wallet(int $user_id, int $page_id, string $
 }
 
 /**
+ * Apply a trust bonus when an on-chain claim is verified.
+ *
+ * Resolves the page linked to the entity (via wallet_link.post_id),
+ * then recomputes the TOTAL on-chain bonus (signals + claims combined)
+ * and applies it via the existing ScoreContributor pipeline.
+ *
+ * This avoids overwriting the signal bonus — applyBonus() does SET not ADD,
+ * so we must always pass the full combined value.
+ *
+ * Claim bonus values by role:
+ *   operator/creator: +5.0
+ *   holder:           +1.0
+ */
+function bcc_onchain_apply_claim_bonus(int $userId, string $entityType, int $entityId, string $role): void {
+    global $wpdb;
+
+    $bonusMap = [
+        'operator' => 5.0,
+        'creator'  => 5.0,
+        'holder'   => 1.0,
+    ];
+
+    $claimBonus = $bonusMap[$role] ?? 0.0;
+    if ($claimBonus <= 0.0) {
+        return;
+    }
+
+    // Resolve page_id: entity → wallet_link → post_id.
+    $entityTable = ($entityType === 'validator')
+        ? bcc_onchain_validators_table()
+        : bcc_onchain_collections_table();
+
+    $walletTable = \BCC\Core\DB\DB::table('wallet_links');
+
+    $pageId = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT w.post_id
+         FROM {$entityTable} e
+         JOIN {$walletTable} w ON w.id = e.wallet_link_id
+         WHERE e.id = %d
+         LIMIT 1",
+        $entityId
+    ));
+
+    if (!$pageId) {
+        return;
+    }
+
+    // Recompute full bonus: existing signal scores + all claim bonuses for this page.
+    $signalBonus = array_sum(array_column(
+        SignalRepository::get_for_page($pageId),
+        'score_contribution'
+    ));
+
+    $claimsTable = bcc_onchain_claims_table();
+    $totalClaimBonus = (float) $wpdb->get_var($wpdb->prepare(
+        "SELECT COALESCE(SUM(CASE
+            WHEN cl.claim_role IN ('operator','creator') THEN 5.0
+            WHEN cl.claim_role = 'holder' THEN 1.0
+            ELSE 0
+         END), 0)
+         FROM {$claimsTable} cl
+         JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
+         JOIN {$walletTable} w ON w.id = e.wallet_link_id
+         WHERE w.post_id = %d AND cl.status = 'verified'",
+        $entityType,
+        $pageId
+    ));
+
+    $totalBonus = min($signalBonus + $totalClaimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+
+    bcc_onchain_apply_bonus($pageId, $totalBonus);
+}
+
+/**
  * Apply the on-chain bonus to the stored trust score.
  *
  * Delegates to bcc-trust-engine via ScoreContributorInterface so this
  * plugin never writes to trust tables directly.
+ *
+ * If the trust engine is unavailable or the write fails, the page_id is
+ * queued for retry via a transient-backed pending list. The daily cron
+ * (bcc_onchain_daily_refresh) and a dedicated retry hook process the queue.
  */
 function bcc_onchain_apply_bonus(int $page_id, float $bonus): void
 {
-    $contributor = class_exists('\\BCC\\Core\\ServiceLocator') ? \BCC\Core\ServiceLocator::resolveScoreContributor() : null;
-
-    if (!$contributor) {
-        error_log('[BCC Onchain] ScoreContributorInterface unavailable — bonus not applied for page ' . $page_id);
+    if (!class_exists('\\BCC\\Core\\ServiceLocator')
+        || !\BCC\Core\ServiceLocator::hasRealService(\BCC\Core\Contracts\ScoreContributorInterface::class)
+    ) {
+        bcc_onchain_queue_bonus_retry($page_id, $bonus);
         return;
     }
 
-    $contributor->applyBonus($page_id, 'onchain', $bonus);
+    $contributor = \BCC\Core\ServiceLocator::resolveScoreContributor();
+    $applied = $contributor->applyBonus($page_id, 'onchain', $bonus);
+
+    if (!$applied) {
+        bcc_onchain_queue_bonus_retry($page_id, $bonus);
+        return;
+    }
+
+    // Success — clear any pending retry for this page
+    bcc_onchain_clear_bonus_retry($page_id);
+}
+
+/**
+ * Queue a failed bonus application for retry.
+ *
+ * Stores pending retries in a transient (auto-expires after 24h as a
+ * safety net). The retry cron processes the queue idempotently: it
+ * recalculates the bonus from stored signals, so stale values are
+ * impossible.
+ */
+function bcc_onchain_queue_bonus_retry(int $page_id, float $bonus): void
+{
+    $pending = get_option('bcc_onchain_pending_bonus', []);
+    $pending[$page_id] = [
+        'bonus'    => $bonus,
+        'queued_at' => time(),
+        'attempts' => ($pending[$page_id]['attempts'] ?? 0) + 1,
+    ];
+    update_option('bcc_onchain_pending_bonus', $pending, false);
+
+    if (class_exists('BCC\\Core\\Log\\Logger')) {
+        \BCC\Core\Log\Logger::error('[bcc-onchain-signals] bonus_queued_for_retry', [
+            'page_id'  => $page_id,
+            'bonus'    => $bonus,
+            'attempts' => $pending[$page_id]['attempts'],
+        ]);
+    }
+}
+
+/**
+ * Clear a page from the pending bonus retry queue.
+ */
+function bcc_onchain_clear_bonus_retry(int $page_id): void
+{
+    $pending = get_option('bcc_onchain_pending_bonus', []);
+    if (isset($pending[$page_id])) {
+        unset($pending[$page_id]);
+        update_option('bcc_onchain_pending_bonus', $pending, false);
+    }
+}
+
+/**
+ * Process all pending bonus retries.
+ *
+ * Idempotent: recalculates the bonus from stored signals (source of
+ * truth) rather than using the stale queued value.
+ */
+function bcc_onchain_process_bonus_retries(): void
+{
+    $pending = get_option('bcc_onchain_pending_bonus', []);
+    if (empty($pending)) {
+        return;
+    }
+
+    // Check that bcc-core is loaded AND a real ScoreContributor is registered
+    // (not the NullScoreContributor fallback). Without a real provider, retries
+    // would burn attempts against the NullObject's always-false applyBonus().
+    if (!class_exists('\\BCC\\Core\\ServiceLocator')) {
+        return; // bcc-core not loaded at all
+    }
+
+    $contributor = \BCC\Core\ServiceLocator::resolveScoreContributor();
+
+    if (!\BCC\Core\ServiceLocator::hasRealService(\BCC\Core\Contracts\ScoreContributorInterface::class)) {
+        return; // Trust engine not active — retry next cycle without burning attempts
+    }
+
+    $max_attempts = 5;
+
+    foreach ($pending as $page_id => $entry) {
+        if (($entry['attempts'] ?? 0) >= $max_attempts) {
+            // Give up after max attempts — log and remove
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[bcc-onchain-signals] bonus_retry_exhausted', [
+                    'page_id'  => $page_id,
+                    'attempts' => $entry['attempts'],
+                ]);
+            }
+            unset($pending[$page_id]);
+            continue;
+        }
+
+        // Recalculate bonus from stored signals (idempotent, no stale data)
+        $all_signals = SignalRepository::get_for_page((int) $page_id);
+        $total_bonus = array_sum(array_column($all_signals, 'score_contribution'));
+        $total_bonus = min($total_bonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+
+        $applied = $contributor->applyBonus((int) $page_id, 'onchain', $total_bonus);
+
+        if ($applied) {
+            unset($pending[$page_id]);
+        } else {
+            $pending[$page_id]['attempts'] = ($entry['attempts'] ?? 0) + 1;
+        }
+    }
+
+    update_option('bcc_onchain_pending_bonus', $pending, false);
 }
 
 /**
@@ -457,18 +673,18 @@ function bcc_onchain_apply_bonus(int $page_id, float $bonus): void
  */
 function bcc_onchain_get_page_for_user(int $user_id): int
 {
-    $resolver = class_exists('\\BCC\\Core\\ServiceLocator') ? \BCC\Core\ServiceLocator::resolvePageOwnerResolver() : null;
-
-    if ($resolver) {
-        return $resolver->getPageForOwner($user_id);
+    if (!class_exists('\\BCC\\Core\\ServiceLocator')) {
+        // bcc-core not loaded — raw WP fallback.
+        global $wpdb;
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT ID FROM {$wpdb->posts}
+             WHERE post_author = %d AND post_type = 'peepso-page' AND post_status = 'publish'
+             LIMIT 1",
+            $user_id
+        ));
     }
 
-    // Fallback: WP post author lookup only (no trust table access).
-    global $wpdb;
-    return (int) $wpdb->get_var($wpdb->prepare(
-        "SELECT ID FROM {$wpdb->posts}
-         WHERE post_author = %d AND post_type = 'peepso-page' AND post_status = 'publish'
-         LIMIT 1",
-        $user_id
-    ));
+    // NullPageOwnerResolver::getPageForOwner() performs the same WP query
+    // as the fallback above, so no separate path is needed.
+    return \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($user_id);
 }

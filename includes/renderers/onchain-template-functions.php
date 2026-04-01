@@ -224,6 +224,116 @@ function bcc_render_validator_chain_card(object $item): void {
     <?php
 }
 
+/**
+ * Render a single NFT collection card.
+ *
+ * Expects these additional properties on $item (set by CollectionService::enrichWithBadges
+ * or by the template before calling):
+ *   ->is_creator       bool  Page owner created this collection.
+ *   ->viewer_holds     bool  Viewing user holds NFTs from this collection.
+ *   ->show_on_profile  int   1 = visible on profile, 0 = hidden.
+ *   ->can_toggle       bool  True if viewer is the page owner (can toggle visibility).
+ *
+ * @param object $item Row from wp_bcc_onchain_collections joined with wp_bcc_chains.
+ */
+function bcc_render_collection_card(object $item): void {
+    $explorer_link = ($item->explorer_url && $item->contract_address)
+        ? esc_url($item->explorer_url . '/token/' . $item->contract_address)
+        : '#';
+    $short_addr = $item->contract_address
+        ? substr($item->contract_address, 0, 8) . '…' . substr($item->contract_address, -4)
+        : '—';
+    $currency = $item->floor_currency ?? $item->native_token ?? 'ETH';
+
+    $is_creator   = !empty($item->is_creator);
+    $viewer_holds = !empty($item->viewer_holds);
+    $can_toggle   = !empty($item->can_toggle);
+    $show_on      = (int) ($item->show_on_profile ?? 1);
+    $data_source  = $item->data_source ?? 'onchain';
+    $is_verified  = ($data_source === 'onchain');
+
+    ?>
+    <div class="bcc-collection-card__header">
+        <span class="bcc-collection-card__chain"><?php echo esc_html($item->chain_name); ?></span>
+        <span class="bcc-collection-card__badges">
+            <?php if ($can_toggle && !$show_on) : ?>
+                <span class="bcc-badge bcc-badge--hidden" title="This collection is hidden from your profile">Hidden</span>
+            <?php endif; ?>
+            <?php if ($is_verified) : ?>
+                <?php if (function_exists('bcc_render_source_badge')) { bcc_render_source_badge('onchain'); } ?>
+            <?php else : ?>
+                <?php if (function_exists('bcc_render_source_badge')) { bcc_render_source_badge('user'); } ?>
+            <?php endif; ?>
+            <?php if ($is_creator) : ?>
+                <span class="bcc-badge bcc-badge--creator" title="Page owner created this collection">Creator</span>
+            <?php endif; ?>
+            <?php if ($viewer_holds) : ?>
+                <span class="bcc-badge bcc-badge--holder" title="You hold NFTs from this collection">Community Member</span>
+            <?php endif; ?>
+            <?php if ($item->token_standard) : ?>
+                <span class="bcc-status-pill bcc-status-neutral"><?php echo esc_html($item->token_standard); ?></span>
+            <?php endif; ?>
+        </span>
+    </div>
+
+    <?php if ($item->collection_name) : ?>
+        <div class="bcc-collection-card__name"><?php echo esc_html($item->collection_name); ?></div>
+    <?php endif; ?>
+
+    <?php
+    // Cast to numeric — ACF manual rows may pass empty strings or string numbers.
+    $floor   = ($item->floor_price   !== null && $item->floor_price   !== '') ? (float) $item->floor_price   : null;
+    $volume  = ($item->total_volume  !== null && $item->total_volume  !== '') ? (float) $item->total_volume  : null;
+    $holders = ($item->unique_holders !== null && $item->unique_holders !== '') ? (int)   $item->unique_holders : null;
+    $supply  = ($item->total_supply  !== null && $item->total_supply  !== '') ? (int)   $item->total_supply  : null;
+    ?>
+    <div class="bcc-collection-card__stats">
+        <?php if ($floor !== null) : ?>
+            <div class="bcc-collection-card__stat">
+                <span class="bcc-stat-label">Floor</span>
+                <span class="bcc-stat-value"><?php echo esc_html(bcc_format_number($floor)); ?> <?php echo esc_html($currency); ?></span>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($volume !== null) : ?>
+            <div class="bcc-collection-card__stat">
+                <span class="bcc-stat-label">Volume</span>
+                <span class="bcc-stat-value"><?php echo esc_html(bcc_format_number($volume)); ?> <?php echo esc_html($currency); ?></span>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($holders !== null) : ?>
+            <div class="bcc-collection-card__stat">
+                <span class="bcc-stat-label">Holders</span>
+                <span class="bcc-stat-value"><?php echo esc_html(number_format($holders)); ?></span>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($supply !== null) : ?>
+            <div class="bcc-collection-card__stat">
+                <span class="bcc-stat-label">Supply</span>
+                <span class="bcc-stat-value"><?php echo esc_html(number_format($supply)); ?></span>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <div class="bcc-collection-card__footer">
+        <a href="<?php echo $explorer_link; ?>" target="_blank" rel="noopener" class="bcc-collection-card__explorer">
+            <?php echo esc_html($short_addr); ?> &#x2197;
+        </a>
+        <?php if ($can_toggle) : ?>
+            <label class="bcc-collection-card__toggle" title="Show this collection on your profile">
+                <input type="checkbox"
+                       class="bcc-collection-profile-toggle"
+                       data-collection-id="<?php echo (int) $item->id; ?>"
+                       <?php checked($show_on, 1); ?>>
+                <span class="bcc-collection-card__toggle-label">Show on profile</span>
+            </label>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
 // ── Formatting Helpers ───────────────────────────────────────────────────────
 
 /**
@@ -255,7 +365,7 @@ function bcc_render_wallet_connect_cta(string $profile_type, int $post_id): void
     $wallet_type = $profile_type === 'validator' ? 'validator' : 'user';
 
     // Group active chains by ecosystem
-    $all_chains    = bcc_onchain_get_active_chains();
+    $all_chains    = \BCC\Onchain\Repositories\ChainRepository::getActive();
     $evm_chains    = [];
     $cosmos_chains = [];
     $solana_chain  = null;

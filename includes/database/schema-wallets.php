@@ -18,8 +18,7 @@ if (!defined('ABSPATH')) {
  * Table name helper.
  */
 function bcc_onchain_wallet_links_table(): string {
-    global $wpdb;
-    return $wpdb->prefix . 'bcc_wallet_links';
+    return \BCC\Core\DB\DB::table('wallet_links');
 }
 
 /**
@@ -56,45 +55,3 @@ function bcc_onchain_create_wallet_links_table(): void {
     dbDelta($sql);
 }
 
-// ── CRUD Operations ──────────────────────────────────────────────────────────
-
-/**
- * Insert a new wallet link. Returns the inserted ID or 0 on failure.
- *
- * @param array $data {
- *     @type int    $user_id
- *     @type int    $post_id
- *     @type string $wallet_address
- *     @type int    $chain_id
- *     @type string $wallet_type     Optional. Default 'user'.
- *     @type string $label           Optional.
- * }
- * @return int Inserted row ID, or 0 on failure.
- */
-function bcc_onchain_insert_wallet(array $data): int {
-    return \BCC\Onchain\Repositories\WalletRepository::insert($data);
-}
-
-function bcc_onchain_verify_wallet(int $wallet_link_id): bool {
-    return \BCC\Onchain\Repositories\WalletRepository::verify($wallet_link_id);
-}
-
-function bcc_onchain_delete_wallet(int $wallet_link_id, int $user_id): bool {
-    return \BCC\Onchain\Repositories\WalletRepository::delete($wallet_link_id, $user_id);
-}
-
-function bcc_onchain_set_primary_wallet(int $wallet_link_id, int $user_id): bool {
-    return \BCC\Onchain\Repositories\WalletRepository::setPrimary($wallet_link_id, $user_id);
-}
-
-function bcc_onchain_get_user_wallets(int $user_id, ?string $wallet_type = null, bool $verified_only = false): array {
-    return \BCC\Onchain\Repositories\WalletRepository::getForUser($user_id, $wallet_type, $verified_only);
-}
-
-function bcc_onchain_get_project_wallets(int $post_id, ?string $wallet_type = null): array {
-    return \BCC\Onchain\Repositories\WalletRepository::getForProject($post_id, $wallet_type);
-}
-
-function bcc_onchain_wallet_exists(int $user_id, int $chain_id, string $wallet_address): bool {
-    return \BCC\Onchain\Repositories\WalletRepository::exists($user_id, $chain_id, $wallet_address);
-}

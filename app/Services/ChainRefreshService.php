@@ -7,6 +7,11 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Factories\FetcherFactory;
+use BCC\Onchain\Repositories\ChainRepository;
+use BCC\Onchain\Repositories\CollectionRepository;
+use BCC\Onchain\Repositories\ValidatorRepository;
+use BCC\Onchain\Repositories\WalletRepository;
+use BCC\Onchain\Services\CollectionService;
 
 /**
  * Chain Refresh Cron
@@ -16,8 +21,6 @@ use BCC\Onchain\Factories\FetcherFactory;
  * Jobs:
  *  - bcc_refresh_validators   (every 1 hour)
  *  - bcc_refresh_collections  (every 4 hours)
- *  - bcc_refresh_dao          (every 6 hours)
- *  - bcc_refresh_contracts    (every 12 hours)
  */
 class ChainRefreshService
 {
@@ -32,8 +35,6 @@ class ChainRefreshService
 
         add_action('bcc_refresh_validators',  [__CLASS__, 'refresh_validators']);
         add_action('bcc_refresh_collections', [__CLASS__, 'refresh_collections']);
-        add_action('bcc_refresh_dao',         [__CLASS__, 'refresh_dao']);
-        add_action('bcc_refresh_contracts',   [__CLASS__, 'refresh_contracts']);
 
         add_action('admin_init', [__CLASS__, 'schedule_crons']);
     }
@@ -47,14 +48,6 @@ class ChainRefreshService
             'interval' => 4 * HOUR_IN_SECONDS,
             'display'  => 'Every 4 Hours',
         ];
-        $schedules['every_6_hours'] = [
-            'interval' => 6 * HOUR_IN_SECONDS,
-            'display'  => 'Every 6 Hours',
-        ];
-        $schedules['every_12_hours'] = [
-            'interval' => 12 * HOUR_IN_SECONDS,
-            'display'  => 'Every 12 Hours',
-        ];
         return $schedules;
     }
 
@@ -66,8 +59,6 @@ class ChainRefreshService
         $jobs = [
             'bcc_refresh_validators'  => 'hourly',
             'bcc_refresh_collections' => 'every_4_hours',
-            'bcc_refresh_dao'         => 'every_6_hours',
-            'bcc_refresh_contracts'   => 'every_12_hours',
         ];
 
         foreach ($jobs as $hook => $interval) {
@@ -84,15 +75,13 @@ class ChainRefreshService
     {
         wp_clear_scheduled_hook('bcc_refresh_validators');
         wp_clear_scheduled_hook('bcc_refresh_collections');
-        wp_clear_scheduled_hook('bcc_refresh_dao');
-        wp_clear_scheduled_hook('bcc_refresh_contracts');
     }
 
     // ── Validator Refresh ────────────────────────────────────────────────────
 
     public static function refresh_validators(): void
     {
-        $expired = bcc_onchain_get_expired_validators(self::BATCH_SIZE);
+        $expired = ValidatorRepository::getExpired(self::BATCH_SIZE);
 
         if (empty($expired)) {
             return;
@@ -100,7 +89,7 @@ class ChainRefreshService
 
         foreach ($expired as $row) {
             try {
-                $chain = bcc_onchain_get_chain_by_id((int) $row->chain_id);
+                $chain = ChainRepository::getById((int) $row->chain_id);
                 if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
                     continue;
                 }
@@ -114,34 +103,58 @@ class ChainRefreshService
                 $data = $fetcher->fetch_validator($row->operator_address);
 
                 if (!empty($data)) {
-                    bcc_onchain_upsert_validator($data, (int) $row->wallet_link_id, HOUR_IN_SECONDS);
+                    ValidatorRepository::upsert($data, (int) $row->wallet_link_id, HOUR_IN_SECONDS);
                 }
             } catch (\Exception $e) {
                 error_log("BCC Refresh: Validator {$row->operator_address} failed — " . $e->getMessage());
-                self::backoffRow(bcc_onchain_validators_table(), (int) $row->id);
+                self::backoffRow(ValidatorRepository::table(), (int) $row->id);
             }
         }
     }
 
-    // ── Collection Refresh (stub) ────────────────────────────────────────────
+    // ── Collection Refresh ──────────────────────────────────────────────────
 
     public static function refresh_collections(): void
     {
-        // TODO: Implement when EVM fetcher is ready
-    }
+        $expired = CollectionRepository::getExpired(self::BATCH_SIZE);
 
-    // ── DAO Refresh (stub) ───────────────────────────────────────────────────
+        if (empty($expired)) {
+            return;
+        }
 
-    public static function refresh_dao(): void
-    {
-        // TODO: Implement when DAO tables are ready
-    }
+        foreach ($expired as $row) {
+            try {
+                $chain = ChainRepository::getById((int) $row->chain_id);
+                if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
+                    continue;
+                }
 
-    // ── Contract Refresh (stub) ──────────────────────────────────────────────
+                $fetcher = FetcherFactory::make_for_chain($chain);
 
-    public static function refresh_contracts(): void
-    {
-        // TODO: Implement when contract tables are ready
+                if (!$fetcher->supports_feature('collection')) {
+                    continue;
+                }
+
+                // Resolve the wallet address from the wallet link
+                $wallet = WalletRepository::getById((int) $row->wallet_link_id);
+                if (!$wallet) {
+                    continue;
+                }
+
+                $collections = $fetcher->fetch_collections($wallet->wallet_address, (int) $row->chain_id);
+
+                foreach ($collections as $collection) {
+                    CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS);
+                }
+
+                if (!empty($collections) && (int) $wallet->post_id > 0) {
+                    CollectionService::invalidate((int) $wallet->post_id);
+                }
+            } catch (\Exception $e) {
+                error_log("BCC Refresh: Collection {$row->contract_address} failed — " . $e->getMessage());
+                self::backoffRow(CollectionRepository::table(), (int) $row->id);
+            }
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

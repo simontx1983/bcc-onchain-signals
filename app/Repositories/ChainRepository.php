@@ -2,6 +2,8 @@
 
 namespace BCC\Onchain\Repositories;
 
+use BCC\Core\DB\DB;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -16,8 +18,7 @@ final class ChainRepository
 
     public static function table(): string
     {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_chains';
+        return DB::table('chains');
     }
 
     public static function getBySlug(string $slug): ?object

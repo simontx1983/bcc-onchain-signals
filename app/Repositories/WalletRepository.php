@@ -2,6 +2,8 @@
 
 namespace BCC\Onchain\Repositories;
 
+use BCC\Core\DB\DB;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -10,8 +12,7 @@ final class WalletRepository
 {
     public static function table(): string
     {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_wallet_links';
+        return DB::table('wallet_links');
     }
 
     /**
@@ -32,6 +33,51 @@ final class WalletRepository
         ], ['%d', '%d', '%s', '%d', '%s', '%s']);
 
         return $inserted ? (int) $wpdb->insert_id : 0;
+    }
+
+    /**
+     * Atomic insert-or-find using INSERT ... ON DUPLICATE KEY UPDATE.
+     *
+     * Relies on the UNIQUE KEY user_chain_wallet (user_id, chain_id, wallet_address).
+     * If the row already exists, returns ['id' => existing_id, 'inserted' => false].
+     * If newly inserted, returns ['id' => new_id, 'inserted' => true].
+     * Returns ['id' => 0, 'inserted' => false] on hard failure.
+     *
+     * @return array{id: int, inserted: bool}
+     */
+    public static function insertOrFind(array $data): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $userId  = (int) $data['user_id'];
+        $postId  = (int) $data['post_id'];
+        $address = sanitize_text_field($data['wallet_address']);
+        $chainId = (int) $data['chain_id'];
+        $type    = sanitize_text_field($data['wallet_type'] ?? 'user');
+        $label   = isset($data['label']) ? sanitize_text_field($data['label']) : '';
+
+        // id = LAST_INSERT_ID(id) on duplicate makes $wpdb->insert_id return
+        // the existing row's ID, giving us a single round-trip atomic upsert.
+        $result = $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$table}
+                (user_id, post_id, wallet_address, chain_id, wallet_type, label)
+             VALUES (%d, %d, %s, %d, %s, %s)
+             ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)",
+            $userId, $postId, $address, $chainId, $type, $label
+        ));
+
+        if ($result === false) {
+            return ['id' => 0, 'inserted' => false];
+        }
+
+        $id = (int) $wpdb->insert_id;
+
+        // $wpdb->rows_affected: 1 = inserted, 2 = duplicate key triggered update
+        return [
+            'id'       => $id,
+            'inserted' => ((int) $wpdb->rows_affected === 1),
+        ];
     }
 
     public static function verify(int $walletLinkId): bool
@@ -74,21 +120,19 @@ final class WalletRepository
             return false;
         }
 
-        $wpdb->update(
-            $table,
-            ['is_primary' => 0],
-            ['user_id' => $userId, 'chain_id' => $chainId],
-            ['%d'],
-            ['%d', '%d']
-        );
+        // Single atomic UPDATE: set is_primary based on whether the row ID
+        // matches the target. This prevents the dual-primary state that could
+        // occur if two separate UPDATEs (clear all → set one) are interrupted.
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+             SET is_primary = CASE WHEN id = %d THEN 1 ELSE 0 END
+             WHERE user_id = %d AND chain_id = %d",
+            $walletLinkId,
+            $userId,
+            $chainId
+        ));
 
-        return (bool) $wpdb->update(
-            $table,
-            ['is_primary' => 1],
-            ['id' => $walletLinkId, 'user_id' => $userId],
-            ['%d'],
-            ['%d', '%d']
-        );
+        return $result !== false;
     }
 
     public static function getForUser(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array

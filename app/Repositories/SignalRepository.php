@@ -6,6 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Core\DB\DB;
 use BCC\Core\PeepSo\PeepSo;
 
 class SignalRepository
@@ -18,8 +19,7 @@ class SignalRepository
 
     public static function table(): string
     {
-        global $wpdb;
-        return $wpdb->prefix . 'bcc_onchain_signals';
+        return DB::table('onchain_signals');
     }
 
     /**

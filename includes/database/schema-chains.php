@@ -17,8 +17,7 @@ if (!defined('ABSPATH')) {
  * Table name helper.
  */
 function bcc_onchain_chains_table(): string {
-    global $wpdb;
-    return $wpdb->prefix . 'bcc_chains';
+    return \BCC\Core\DB\DB::table('chains');
 }
 
 /**
@@ -205,24 +204,3 @@ function bcc_onchain_create_chains_table(): void {
     }
 }
 
-/**
- * Get a chain row by slug.
- *
- * @param string $slug Chain slug (e.g. 'ethereum', 'cosmos').
- * @return object|null
- */
-function bcc_onchain_get_chain(string $slug): ?object {
-    return \BCC\Onchain\Repositories\ChainRepository::getBySlug($slug);
-}
-
-function bcc_onchain_get_chain_by_id(int $chain_id): ?object {
-    return \BCC\Onchain\Repositories\ChainRepository::getById($chain_id);
-}
-
-function bcc_onchain_get_active_chains(?string $chain_type = null): array {
-    return \BCC\Onchain\Repositories\ChainRepository::getActive($chain_type);
-}
-
-function bcc_onchain_resolve_chain_id(string $slug): ?int {
-    return \BCC\Onchain\Repositories\ChainRepository::resolveId($slug);
-}

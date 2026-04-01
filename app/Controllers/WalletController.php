@@ -2,6 +2,10 @@
 
 namespace BCC\Onchain\Controllers;
 
+use BCC\Onchain\Repositories\ChainRepository;
+use BCC\Onchain\Repositories\WalletRepository;
+use BCC\Onchain\Services\CollectionService;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -32,6 +36,9 @@ class WalletController
         add_action('wp_ajax_bcc_wallet_disconnect',   [__CLASS__, 'ajax_disconnect']);
         add_action('wp_ajax_bcc_wallet_set_primary',  [__CLASS__, 'ajax_set_primary']);
         add_action('wp_ajax_bcc_wallet_list',         [__CLASS__, 'ajax_list']);
+        add_action('wp_ajax_bcc_collection_toggle_profile', [__CLASS__, 'ajax_toggle_collection_profile']);
+        add_action('wp_ajax_bcc_claim_entity', [__CLASS__, 'ajax_claim_entity']);
+        add_action('wp_ajax_bcc_claim_status', [__CLASS__, 'ajax_claim_status']);
 
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
         add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_assets']);
@@ -55,7 +62,7 @@ class WalletController
             wp_send_json_error(['message' => 'Missing chain or address.'], 400);
         }
 
-        $chain_id = bcc_onchain_resolve_chain_id($chain_slug);
+        $chain_id = ChainRepository::resolveId($chain_slug);
         if (!$chain_id) {
             wp_send_json_error(['message' => 'Unsupported chain.'], 400);
         }
@@ -114,13 +121,9 @@ class WalletController
             wp_send_json_error(['message' => 'Challenge expired. Please try again.'], 400);
         }
 
-        $chain = bcc_onchain_get_chain_by_id((int) $challenge['chain_id']);
+        $chain = ChainRepository::getById((int) $challenge['chain_id']);
         if (!$chain) {
             wp_send_json_error(['message' => 'Chain not found.'], 400);
-        }
-
-        if (bcc_onchain_wallet_exists($user_id, (int) $chain->id, $wallet_address)) {
-            wp_send_json_error(['message' => 'This wallet is already linked to your account.'], 409);
         }
 
         if (defined('WP_DEBUG') && WP_DEBUG) {
@@ -146,7 +149,10 @@ class WalletController
 
         delete_user_meta($user_id, $meta_key);
 
-        $wallet_link_id = bcc_onchain_insert_wallet([
+        // Atomic insert-or-find: uses INSERT ... ON DUPLICATE KEY UPDATE
+        // against the UNIQUE KEY (user_id, chain_id, wallet_address).
+        // Eliminates the TOCTOU race between exists() check and insert().
+        $result = WalletRepository::insertOrFind([
             'user_id'        => $user_id,
             'post_id'        => $post_id,
             'wallet_address' => $wallet_address,
@@ -155,35 +161,32 @@ class WalletController
             'label'          => $label,
         ]);
 
+        $wallet_link_id = $result['id'];
+
         if (!$wallet_link_id) {
-            global $wpdb;
-            if (strpos($wpdb->last_error, 'Duplicate') !== false) {
-                if (class_exists('BCC\\Core\\Log\\Logger')) {
-                    \BCC\Core\Log\Logger::error('[bcc-onchain-signals] wallet_insert_race', [
-                        'user_id'  => $user_id,
-                        'chain_id' => (int) $chain->id,
-                    ]);
-                }
-                wp_send_json_error(['message' => 'This wallet is already linked to your account.'], 409);
-            }
             if (class_exists('BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::error('[bcc-onchain-signals] wallet_insert_failed', [
                     'user_id'  => $user_id,
                     'chain_id' => (int) $chain->id,
-                    'db_error' => $wpdb->last_error,
                 ]);
             }
             wp_send_json_error(['message' => 'Failed to save wallet.'], 500);
         }
 
-        bcc_onchain_verify_wallet($wallet_link_id);
+        if (!$result['inserted']) {
+            // Wallet already existed — concurrent request or re-verification.
+            // Return 409 so the frontend knows it's a duplicate.
+            wp_send_json_error(['message' => 'This wallet is already linked to your account.'], 409);
+        }
 
-        $user_wallets  = bcc_onchain_get_user_wallets($user_id);
+        WalletRepository::verify($wallet_link_id);
+
+        $user_wallets  = WalletRepository::getForUser($user_id);
         $chain_wallets = array_filter($user_wallets, function ($w) use ($chain) {
             return (int) $w->chain_id === (int) $chain->id;
         });
         if (count($chain_wallets) <= 1) {
-            bcc_onchain_set_primary_wallet($wallet_link_id, $user_id);
+            WalletRepository::setPrimary($wallet_link_id, $user_id);
         }
 
         do_action('bcc_wallet_verified', $user_id, $chain->slug, $wallet_address);
@@ -211,7 +214,7 @@ class WalletController
             wp_send_json_error(['message' => 'Invalid request.'], 400);
         }
 
-        $deleted = bcc_onchain_delete_wallet($wallet_link_id, $user_id);
+        $deleted = WalletRepository::delete($wallet_link_id, $user_id);
 
         if (!$deleted) {
             wp_send_json_error(['message' => 'Wallet not found or not yours.'], 404);
@@ -233,7 +236,7 @@ class WalletController
             wp_send_json_error(['message' => 'Invalid request.'], 400);
         }
 
-        $result = bcc_onchain_set_primary_wallet($wallet_link_id, $user_id);
+        $result = WalletRepository::setPrimary($wallet_link_id, $user_id);
 
         if (!$result) {
             wp_send_json_error(['message' => 'Wallet not found or not yours.'], 404);
@@ -253,7 +256,7 @@ class WalletController
             wp_send_json_error(['message' => 'Not logged in.'], 401);
         }
 
-        $wallets = bcc_onchain_get_user_wallets($user_id);
+        $wallets = WalletRepository::getForUser($user_id);
 
         wp_send_json_success([
             'wallets' => array_map(function ($w) {
@@ -299,20 +302,20 @@ class WalletController
 
     public static function rest_list_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
-        $wallets = bcc_onchain_get_user_wallets(get_current_user_id());
+        $wallets = WalletRepository::getForUser(get_current_user_id());
         return rest_ensure_response($wallets);
     }
 
     public static function rest_project_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
         $post_id = (int) $req->get_param('post_id');
-        $wallets = bcc_onchain_get_project_wallets($post_id);
+        $wallets = WalletRepository::getForProject($post_id);
         return rest_ensure_response($wallets);
     }
 
     public static function rest_list_chains(\WP_REST_Request $req): \WP_REST_Response
     {
-        $chains = bcc_onchain_get_active_chains();
+        $chains = ChainRepository::getActive();
         return rest_ensure_response($chains);
     }
 
@@ -361,6 +364,100 @@ class WalletController
         );
     }
 
+    // ── AJAX: Toggle Collection Profile Visibility ─────────────────────────
+
+    public static function ajax_toggle_collection_profile(): void
+    {
+        check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        $user_id       = get_current_user_id();
+        $collection_id = (int) ($_POST['collection_id'] ?? 0);
+        $show          = filter_var($_POST['show'] ?? true, FILTER_VALIDATE_BOOLEAN);
+
+        if (!$user_id || !$collection_id) {
+            wp_send_json_error(['message' => 'Invalid request.'], 400);
+        }
+
+        $updated = CollectionService::toggleProfileVisibility($collection_id, $user_id, $show);
+
+        if (!$updated) {
+            wp_send_json_error(['message' => 'Collection not found or not yours.'], 404);
+        }
+
+        wp_send_json_success(['collection_id' => $collection_id, 'show_on_profile' => $show]);
+    }
+
+    // ── Claim AJAX ──────────────────────────────────────────────────────────
+
+    /**
+     * AJAX: Claim an on-chain entity (validator/collection).
+     * Verifies user's connected wallet matches the entity's on-chain owner.
+     */
+    public static function ajax_claim_entity(): void
+    {
+        check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        $user_id     = get_current_user_id();
+        $entity_type = sanitize_key($_POST['entity_type'] ?? '');
+        $entity_id   = (int) ($_POST['entity_id'] ?? 0);
+
+        if (!$user_id) {
+            wp_send_json_error(['message' => 'Authentication required.'], 401);
+        }
+
+        if (!$entity_type || !$entity_id) {
+            wp_send_json_error(['message' => 'Missing entity type or ID.'], 400);
+        }
+
+        $result = \BCC\Onchain\Services\ClaimService::claim($user_id, $entity_type, $entity_id);
+
+        if ($result['success']) {
+            wp_send_json_success($result);
+        } else {
+            $code = !empty($result['needs_wallet']) ? 412 : 400;
+            wp_send_json_error($result, $code);
+        }
+    }
+
+    /**
+     * AJAX: Check claim status for an entity (used by block to show badges).
+     */
+    public static function ajax_claim_status(): void
+    {
+        check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        $entity_type = sanitize_key($_GET['entity_type'] ?? $_POST['entity_type'] ?? '');
+        $entity_id   = (int) ($_GET['entity_id'] ?? $_POST['entity_id'] ?? 0);
+
+        if (!$entity_type || !$entity_id) {
+            wp_send_json_error(['message' => 'Missing parameters.'], 400);
+        }
+
+        $claims = \BCC\Onchain\Repositories\ClaimRepository::getForEntity($entity_type, $entity_id);
+
+        $user_id    = get_current_user_id();
+        $user_claim = null;
+        if ($user_id) {
+            $user_claim = \BCC\Onchain\Repositories\ClaimRepository::getUserClaim($user_id, $entity_type, $entity_id);
+        }
+
+        wp_send_json_success([
+            'claims'     => array_map(function ($c) {
+                return [
+                    'user_id'      => (int) $c->user_id,
+                    'claimer_name' => $c->claimer_name ?? '',
+                    'role'         => $c->claim_role,
+                    'verified_at'  => $c->verified_at,
+                ];
+            }, $claims),
+            'user_claim' => $user_claim ? [
+                'id'     => (int) $user_claim->id,
+                'role'   => $user_claim->claim_role,
+                'status' => $user_claim->status,
+            ] : null,
+        ]);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static function challengeKey(int $user_id, string $address): string
@@ -370,7 +467,7 @@ class WalletController
 
     private static function getChainsForJs(): array
     {
-        $chains = bcc_onchain_get_active_chains();
+        $chains = ChainRepository::getActive();
         $result = [];
 
         foreach ($chains as $chain) {

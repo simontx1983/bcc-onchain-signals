@@ -6,6 +6,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
 
 /**
@@ -13,8 +14,11 @@ use BCC\Onchain\Contracts\FetcherInterface;
  *
  * Fetches validator and DAO data from Cosmos SDK chains via LCD REST API.
  * Supports any Cosmos SDK chain (cosmoshub, osmosis, akash, juno, etc.).
+ *
+ * NFT collections: Cosmos SDK chains may have CW-721 NFTs (e.g. Stargaze)
+ * but no standardized LCD endpoint exists for discovery. Returns empty.
  */
-class CosmosFetcher implements FetcherInterface
+class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
 {
     private object $chain;
     private string $rest_url;
@@ -87,47 +91,14 @@ class CosmosFetcher implements FetcherInterface
         ];
     }
 
-    // ── DAO Fetching ─────────────────────────────────────────────────────────
-
-    public function fetch_dao_stats(string $contract): array
-    {
-        $proposals = $this->lcdGet('/cosmos/gov/v1beta1/proposals', [
-            'pagination.limit'       => 1,
-            'pagination.count_total' => 'true',
-        ]);
-
-        $total_proposals = (int) ($proposals['pagination']['total'] ?? 0);
-
-        $passed = $this->lcdGet('/cosmos/gov/v1beta1/proposals', [
-            'proposal_status'        => '3',
-            'pagination.limit'       => 1,
-            'pagination.count_total' => 'true',
-        ]);
-        $passed_count = (int) ($passed['pagination']['total'] ?? 0);
-
-        $participation = $this->estimateParticipationRate();
-
-        return [
-            'governance_contract' => 'native',
-            'chain_id'            => (int) $this->chain->id,
-            'platform'            => 'cosmos-gov',
-            'total_proposals'     => $total_proposals,
-            'passed_proposals'    => $passed_count,
-            'participation_rate'  => $participation,
-            'quorum_threshold'    => null,
-            'token_holders'       => null,
-            'active_voters'       => null,
-        ];
-    }
-
     // ── Not Supported ────────────────────────────────────────────────────────
 
-    public function fetch_collections(string $address): array
-    {
-        return [];
-    }
-
-    public function fetch_contracts(string $address): array
+    /**
+     * Cosmos chains lack a standardized NFT collection indexer on LCD.
+     * CW-721 NFTs exist on chains like Stargaze but require chain-specific
+     * indexers (e.g. Constellations API). Returns empty for now.
+     */
+    public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         return [];
     }
@@ -409,39 +380,6 @@ class CosmosFetcher implements FetcherInterface
         }
 
         return round(($voted / $total) * 100, 2);
-    }
-
-    private function estimateParticipationRate(): ?float
-    {
-        $proposals = $this->lcdGet('/cosmos/gov/v1beta1/proposals', [
-            'proposal_status'    => '3',
-            'pagination.limit'   => 5,
-            'pagination.reverse' => 'true',
-        ]);
-
-        if (!$proposals || empty($proposals['proposals'])) {
-            return null;
-        }
-
-        $latest = $proposals['proposals'][0] ?? null;
-        if (!$latest || !isset($latest['final_tally_result'])) {
-            return null;
-        }
-
-        $tally = $latest['final_tally_result'];
-        $total_voted = (float) ($tally['yes'] ?? 0)
-            + (float) ($tally['no'] ?? 0)
-            + (float) ($tally['no_with_veto'] ?? 0)
-            + (float) ($tally['abstain'] ?? 0);
-
-        $pool   = $this->lcdGet('/cosmos/staking/v1beta1/pool');
-        $bonded = (float) ($pool['pool']['bonded_tokens'] ?? 0);
-
-        if ($bonded === 0.0) {
-            return null;
-        }
-
-        return round(($total_voted / $bonded) * 100, 2);
     }
 
     private function fetchVotingPowerRank(string $valoper): ?int
