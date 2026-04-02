@@ -51,7 +51,7 @@ use BCC\Onchain\Services\ChainRefreshService;
 use BCC\Onchain\Controllers\WalletController;
 use BCC\Onchain\Admin\SettingsPage;
 
-define('BCC_ONCHAIN_VERSION', '1.6.0');
+define('BCC_ONCHAIN_VERSION', '1.6.1');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 
@@ -165,6 +165,18 @@ function bcc_onchain_boot(): void {
         $installed = get_option('bcc_onchain_db_version', '0');
         if (version_compare($installed, BCC_ONCHAIN_VERSION, '<')) {
             bcc_onchain_ensure_schema();
+
+            // dbDelta cannot ALTER existing columns — run explicit migrations.
+            global $wpdb;
+            $wpdb->query("ALTER TABLE " . bcc_onchain_validators_table() . " MODIFY wallet_link_id BIGINT UNSIGNED DEFAULT NULL");
+            $wpdb->query("ALTER TABLE " . bcc_onchain_collections_table() . " MODIFY wallet_link_id BIGINT UNSIGNED DEFAULT NULL");
+
+            // Add image_url column if missing (new in 1.6.0).
+            $cols = $wpdb->get_col("SHOW COLUMNS FROM " . bcc_onchain_collections_table());
+            if (!in_array('image_url', $cols, true)) {
+                $wpdb->query("ALTER TABLE " . bcc_onchain_collections_table() . " ADD COLUMN image_url VARCHAR(500) DEFAULT NULL AFTER metadata_storage");
+            }
+
             update_option('bcc_onchain_db_version', BCC_ONCHAIN_VERSION);
         }
     });
