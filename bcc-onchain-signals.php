@@ -51,7 +51,7 @@ use BCC\Onchain\Services\ChainRefreshService;
 use BCC\Onchain\Controllers\WalletController;
 use BCC\Onchain\Admin\SettingsPage;
 
-define('BCC_ONCHAIN_VERSION', '1.4.0');
+define('BCC_ONCHAIN_VERSION', '1.5.0');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 

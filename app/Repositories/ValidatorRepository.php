@@ -63,6 +63,67 @@ final class ValidatorRepository
         return $wpdb->insert_id ?: false;
     }
 
+    /**
+     * Bulk-upsert validators for a chain (no wallet_link_id required).
+     * Used by the chain-level indexing cron. Matches on (chain_id, operator_address).
+     *
+     * @param array[] $validators Array of validator data arrays from fetch_all_validators().
+     * @param int     $ttlSeconds TTL for expires_at.
+     * @return int Number of rows written.
+     */
+    public static function bulkUpsert(array $validators, int $ttlSeconds = HOUR_IN_SECONDS): int
+    {
+        if (empty($validators)) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table     = self::table();
+        $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+        $now       = current_time('mysql', true);
+        $count     = 0;
+
+        foreach ($validators as $data) {
+            $result = $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$table}
+                    (wallet_link_id, operator_address, chain_id, moniker, status,
+                     commission_rate, total_stake, self_stake, delegator_count,
+                     uptime_30d, governance_participation, jailed_count,
+                     voting_power_rank, fetched_at, expires_at)
+                 VALUES (NULL, %s, %d, %s, %s, %f, %f, %f, %d, %f, %f, %d, %d, %s, %s)
+                 ON DUPLICATE KEY UPDATE
+                    moniker                  = VALUES(moniker),
+                    status                   = VALUES(status),
+                    commission_rate          = VALUES(commission_rate),
+                    total_stake              = VALUES(total_stake),
+                    jailed_count             = VALUES(jailed_count),
+                    voting_power_rank        = VALUES(voting_power_rank),
+                    fetched_at               = VALUES(fetched_at),
+                    expires_at               = VALUES(expires_at)",
+                $data['operator_address'],
+                (int) $data['chain_id'],
+                $data['moniker'] ?? null,
+                $data['status'] ?? 'unknown',
+                $data['commission_rate'] ?? null,
+                $data['total_stake'] ?? null,
+                $data['self_stake'] ?? null,
+                $data['delegator_count'] ?? null,
+                $data['uptime_30d'] ?? null,
+                $data['governance_participation'] ?? null,
+                $data['jailed_count'] ?? 0,
+                $data['voting_power_rank'] ?? null,
+                $now,
+                $expiresAt
+            ));
+
+            if ($result !== false) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
     public static function getForWallet(int $walletLinkId): array
     {
         global $wpdb;

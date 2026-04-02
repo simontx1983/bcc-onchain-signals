@@ -35,6 +35,7 @@ class ChainRefreshService
 
         add_action('bcc_refresh_validators',  [__CLASS__, 'refresh_validators']);
         add_action('bcc_refresh_collections', [__CLASS__, 'refresh_collections']);
+        add_action('bcc_index_validators',   [__CLASS__, 'index_validators']);
 
         add_action('admin_init', [__CLASS__, 'schedule_crons']);
     }
@@ -59,6 +60,7 @@ class ChainRefreshService
         $jobs = [
             'bcc_refresh_validators'  => 'hourly',
             'bcc_refresh_collections' => 'every_4_hours',
+            'bcc_index_validators'    => 'every_4_hours',
         ];
 
         foreach ($jobs as $hook => $interval) {
@@ -75,9 +77,50 @@ class ChainRefreshService
     {
         wp_clear_scheduled_hook('bcc_refresh_validators');
         wp_clear_scheduled_hook('bcc_refresh_collections');
+        wp_clear_scheduled_hook('bcc_index_validators');
     }
 
-    // ── Validator Refresh ────────────────────────────────────────────────────
+    // ── Validator Indexing (bulk — all validators per chain) ────────────────
+
+    /**
+     * Fetch and store ALL active validators for every Cosmos chain.
+     *
+     * This is the discovery/seeding path — populates the validators table
+     * with the full active set so the discovery UI and claim system have
+     * data to display. Runs every 4 hours.
+     *
+     * The per-validator refresh cron (refresh_validators) handles expensive
+     * enrichment (uptime, governance, delegations) on expired rows.
+     */
+    public static function index_validators(): void
+    {
+        $cosmos_chains = ChainRepository::getActive('cosmos');
+
+        foreach ($cosmos_chains as $chain) {
+            try {
+                if (!FetcherFactory::has_driver($chain->chain_type)) {
+                    continue;
+                }
+
+                $fetcher = FetcherFactory::make_for_chain($chain);
+
+                if (!method_exists($fetcher, 'fetch_all_validators')) {
+                    continue;
+                }
+
+                $validators = $fetcher->fetch_all_validators();
+
+                if (!empty($validators)) {
+                    $count = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
+                    error_log("[BCC Onchain] Indexed {$count} validators for {$chain->name}");
+                }
+            } catch (\Exception $e) {
+                error_log("[BCC Onchain] Validator index failed for {$chain->name}: " . $e->getMessage());
+            }
+        }
+    }
+
+    // ── Validator Refresh (per-row — enriches expired validators) ─────────
 
     public static function refresh_validators(): void
     {

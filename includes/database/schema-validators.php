@@ -29,7 +29,7 @@ function bcc_onchain_create_validators_table(): void {
 
     $sql = "CREATE TABLE {$table} (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        wallet_link_id BIGINT UNSIGNED NOT NULL,
+        wallet_link_id BIGINT UNSIGNED DEFAULT NULL,
         operator_address VARCHAR(128) NOT NULL,
         chain_id BIGINT UNSIGNED NOT NULL,
         moniker VARCHAR(200) DEFAULT NULL,
@@ -47,6 +47,7 @@ function bcc_onchain_create_validators_table(): void {
         PRIMARY KEY (id),
         KEY wallet_link_id (wallet_link_id),
         KEY chain_id (chain_id),
+        UNIQUE KEY uq_chain_operator (chain_id, operator_address),
         KEY operator_address (operator_address),
         KEY expires_at (expires_at),
         KEY status (status),

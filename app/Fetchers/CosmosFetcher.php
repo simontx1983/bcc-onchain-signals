@@ -91,6 +91,60 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
         ];
     }
 
+    // ── Bulk Validator Fetching ────────────────────────────────────────────
+
+    /**
+     * Fetch ALL active validators from the chain's bonded set.
+     *
+     * Uses the paginated LCD staking endpoint to get up to 500 validators
+     * in a single call. Returns lightweight rows (no per-validator uptime
+     * or governance calls — those are expensive and done on refresh).
+     *
+     * @return array[] Array of validator data arrays ready for bulkUpsert.
+     */
+    public function fetch_all_validators(): array
+    {
+        $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
+            'status'           => 'BOND_STATUS_BONDED',
+            'pagination.limit' => 500,
+        ]);
+
+        if (!$response || empty($response['validators'])) {
+            return [];
+        }
+
+        $vals = $response['validators'];
+
+        // Sort by tokens descending to derive rank.
+        usort($vals, function ($a, $b) {
+            return bccomp($b['tokens'] ?? '0', $a['tokens'] ?? '0');
+        });
+
+        $results = [];
+        foreach ($vals as $rank => $val) {
+            $commission = isset($val['commission']['commission_rates']['rate'])
+                ? round((float) $val['commission']['commission_rates']['rate'] * 100, 2)
+                : null;
+
+            $results[] = [
+                'operator_address'         => $val['operator_address'],
+                'chain_id'                 => (int) $this->chain->id,
+                'moniker'                  => $val['description']['moniker'] ?? null,
+                'status'                   => $this->parseStatus($val['status'] ?? ''),
+                'commission_rate'          => $commission,
+                'total_stake'              => isset($val['tokens']) ? $this->tokensToDisplay($val['tokens']) : null,
+                'self_stake'               => null,  // Expensive per-validator call — populated on refresh
+                'delegator_count'          => null,  // Same — populated on refresh
+                'uptime_30d'               => null,  // Same — populated on refresh
+                'governance_participation' => null,  // Same — populated on refresh
+                'jailed_count'             => ($val['jailed'] ?? false) ? 1 : 0,
+                'voting_power_rank'        => $rank + 1,
+            ];
+        }
+
+        return $results;
+    }
+
     // ── Not Supported ────────────────────────────────────────────────────────
 
     /**
