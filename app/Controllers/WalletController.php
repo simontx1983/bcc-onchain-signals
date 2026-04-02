@@ -433,12 +433,19 @@ class WalletController
             wp_send_json_error(['message' => 'Missing parameters.'], 400);
         }
 
-        $claims = \BCC\Onchain\Repositories\ClaimRepository::getForEntity($entity_type, $entity_id);
+        // Single query — getForEntity() returns all verified claims with user names.
+        // Extract the current user's claim from the same result set instead of a second query.
+        $claims  = \BCC\Onchain\Repositories\ClaimRepository::getForEntity($entity_type, $entity_id);
+        $user_id = get_current_user_id();
 
-        $user_id    = get_current_user_id();
         $user_claim = null;
         if ($user_id) {
-            $user_claim = \BCC\Onchain\Repositories\ClaimRepository::getUserClaim($user_id, $entity_type, $entity_id);
+            foreach ($claims as $c) {
+                if ((int) $c->user_id === $user_id) {
+                    $user_claim = $c;
+                    break;
+                }
+            }
         }
 
         wp_send_json_success([

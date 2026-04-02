@@ -175,6 +175,41 @@ class ClaimRepository {
     }
 
     /**
+     * Batch-load all verified claims for multiple entities of the same type.
+     * Single query replacing N per-entity lookups.
+     *
+     * @param string $entityType 'validator' or 'collection'
+     * @param int[]  $entityIds
+     * @return array<int, object[]> entity_id => array of claim objects
+     */
+    public static function getForEntityBatch(string $entityType, array $entityIds): array {
+        if (empty($entityIds)) {
+            return [];
+        }
+
+        global $wpdb;
+        $table = self::table();
+        $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT cl.*, u.display_name AS claimer_name
+             FROM {$table} cl
+             INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
+             WHERE cl.entity_type = %s AND cl.entity_id IN ({$ph}) AND cl.status = 'verified'
+             ORDER BY cl.verified_at ASC",
+            $entityType,
+            ...$entityIds
+        ));
+
+        $map = [];
+        foreach ($rows as $row) {
+            $map[(int) $row->entity_id][] = $row;
+        }
+
+        return $map;
+    }
+
+    /**
      * Get all claims by a user.
      */
     public static function getForUser(int $userId): array {
