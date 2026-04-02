@@ -184,6 +184,59 @@ final class ValidatorRepository
         ];
     }
 
+    /**
+     * Get top validators globally (not per-project). Used by leaderboard block.
+     *
+     * @return array{items: array, total: int, pages: int}
+     */
+    public static function getTopValidators(int $page = 1, int $perPage = 20, string $orderBy = 'total_stake', ?int $chainId = null): array
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $allowedOrder = ['total_stake', 'voting_power_rank', 'commission_rate', 'delegator_count', 'uptime_30d'];
+        if (!in_array($orderBy, $allowedOrder, true)) {
+            $orderBy = 'total_stake';
+        }
+
+        $orderDir = ($orderBy === 'voting_power_rank' || $orderBy === 'commission_rate') ? 'ASC' : 'DESC';
+        $offset   = ($page - 1) * $perPage;
+
+        $where  = '1=1';
+        $params = [];
+
+        if ($chainId) {
+            $where   .= ' AND v.chain_id = %d';
+            $params[] = $chainId;
+        }
+
+        $countSql = "SELECT COUNT(*) FROM {$table} v WHERE {$where}";
+        $mainSql  = "SELECT v.*, c.slug AS chain_slug, c.name AS chain_name, c.explorer_url, c.native_token
+                     FROM {$table} v
+                     JOIN {$chains} c ON c.id = v.chain_id
+                     WHERE {$where}
+                     ORDER BY v.{$orderBy} {$orderDir}
+                     LIMIT %d OFFSET %d";
+
+        $countParams = $params;
+        $mainParams  = array_merge($params, [$perPage, $offset]);
+
+        $total = empty($countParams)
+            ? (int) $wpdb->get_var($countSql)
+            : (int) $wpdb->get_var($wpdb->prepare($countSql, ...$countParams));
+
+        $items = empty($mainParams)
+            ? $wpdb->get_results($mainSql)
+            : $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
+
+        return [
+            'items' => $items ?: [],
+            'total' => $total,
+            'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
+        ];
+    }
+
     public static function getExpired(int $limit = 50): array
     {
         global $wpdb;
