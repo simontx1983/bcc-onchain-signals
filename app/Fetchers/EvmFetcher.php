@@ -143,6 +143,114 @@ class EvmFetcher implements FetcherInterface, CollectionFetcherInterface
         return $collections;
     }
 
+    // ── Bulk Collection Indexing ───────────────────────────────────────────
+
+    /**
+     * Fetch top NFT collections for this EVM chain via Reservoir API.
+     *
+     * Reservoir provides free-tier access (no API key, 4 req/sec) to the same
+     * data shown on etherscan.io/nft-top-contracts: name, floor, volume,
+     * holders, supply, image.
+     *
+     * @param int $limit Number of top collections to fetch (max 100 per call).
+     * @return array[] Array of normalized collection data rows.
+     */
+    public function fetch_top_collections(int $limit = 100): array
+    {
+        $chainId = (int) $this->chain->id;
+
+        // Map our chain slugs to Reservoir chain IDs.
+        $reservoirChains = [
+            'ethereum'  => 1,
+            'polygon'   => 137,
+            'arbitrum'  => 42161,
+            'optimism'  => 10,
+            'base'      => 8453,
+            'avalanche' => 43114,
+            'bsc'       => 56,
+        ];
+
+        $slug = $this->chain->slug ?? '';
+        $reservoirChainId = $reservoirChains[$slug] ?? null;
+
+        if (!$reservoirChainId) {
+            return [];
+        }
+
+        $baseUrl = ($reservoirChainId === 1)
+            ? 'https://api.reservoir.tools'
+            : "https://api-{$slug}.reservoir.tools";
+
+        $url = add_query_arg([
+            'sortBy'         => 'allTimeVolume',
+            'limit'          => min($limit, 100),
+            'includeTopBid'  => 'false',
+        ], $baseUrl . '/collections/v7');
+
+        $headers = ['Accept' => 'application/json'];
+
+        // Use API key if configured (higher rate limits).
+        if (defined('BCC_RESERVOIR_API_KEY') && BCC_RESERVOIR_API_KEY) {
+            $headers['x-api-key'] = BCC_RESERVOIR_API_KEY;
+        }
+
+        $response = wp_remote_get($url, [
+            'timeout' => 20,
+            'headers' => $headers,
+        ]);
+
+        if (is_wp_error($response)) {
+            error_log('[BCC Onchain] Reservoir fetch failed: ' . $response->get_error_message());
+            return [];
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code !== 200) {
+            error_log("[BCC Onchain] Reservoir returned {$code} for {$slug}");
+            return [];
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $items = $body['collections'] ?? [];
+
+        if (empty($items)) {
+            return [];
+        }
+
+        $native = $this->chain->native_token ?? 'ETH';
+        $collections = [];
+
+        foreach ($items as $item) {
+            $contract = $item['primaryContract'] ?? ($item['id'] ?? '');
+            if (!$contract) {
+                continue;
+            }
+
+            $floorAsk = $item['floorAsk']['price']['amount']['native'] ?? null;
+            $volume   = $item['volume']['allTime'] ?? null;
+
+            $collections[] = [
+                'contract_address'   => $contract,
+                'chain_id'           => $chainId,
+                'collection_name'    => $item['name'] ?? null,
+                'token_standard'     => $item['contractKind'] ?? 'ERC-721',
+                'total_supply'       => isset($item['tokenCount']) ? (int) $item['tokenCount'] : null,
+                'floor_price'        => $floorAsk !== null ? (float) $floorAsk : null,
+                'floor_currency'     => $native,
+                'unique_holders'     => isset($item['ownerCount']) ? (int) $item['ownerCount'] : null,
+                'total_volume'       => $volume !== null ? (float) $volume : null,
+                'listed_percentage'  => isset($item['onSaleCount'], $item['tokenCount']) && $item['tokenCount'] > 0
+                    ? round((int) $item['onSaleCount'] / (int) $item['tokenCount'] * 100, 2)
+                    : null,
+                'royalty_percentage' => isset($item['royalties']['bps']) ? (float) $item['royalties']['bps'] / 100 : null,
+                'metadata_storage'   => null,
+                'image_url'          => $item['image'] ?? null,
+            ];
+        }
+
+        return $collections;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**

@@ -36,6 +36,7 @@ class ChainRefreshService
         add_action('bcc_refresh_validators',  [__CLASS__, 'refresh_validators']);
         add_action('bcc_refresh_collections', [__CLASS__, 'refresh_collections']);
         add_action('bcc_index_validators',   [__CLASS__, 'index_validators']);
+        add_action('bcc_index_collections',  [__CLASS__, 'index_collections']);
 
         add_action('admin_init', [__CLASS__, 'schedule_crons']);
     }
@@ -61,6 +62,7 @@ class ChainRefreshService
             'bcc_refresh_validators'  => 'hourly',
             'bcc_refresh_collections' => 'every_4_hours',
             'bcc_index_validators'    => 'every_4_hours',
+            'bcc_index_collections'   => 'every_4_hours',
         ];
 
         foreach ($jobs as $hook => $interval) {
@@ -78,6 +80,7 @@ class ChainRefreshService
         wp_clear_scheduled_hook('bcc_refresh_validators');
         wp_clear_scheduled_hook('bcc_refresh_collections');
         wp_clear_scheduled_hook('bcc_index_validators');
+        wp_clear_scheduled_hook('bcc_index_collections');
     }
 
     // ── Validator Indexing (bulk — all validators per chain) ────────────────
@@ -116,6 +119,44 @@ class ChainRefreshService
                 }
             } catch (\Exception $e) {
                 error_log("[BCC Onchain] Validator index failed for {$chain->name}: " . $e->getMessage());
+            }
+        }
+    }
+
+    // ── Collection Indexing (bulk — top NFT collections per EVM chain) ─────
+
+    /**
+     * Fetch and store top NFT collections for every EVM chain.
+     *
+     * Uses Reservoir API (free tier) to get the same data shown on
+     * etherscan.io/nft-top-contracts: name, floor, volume, holders, image.
+     * Runs every 4 hours. Collections with wallet_link_id = NULL are
+     * unclaimed — displayed with "Claim Your Community" button.
+     */
+    public static function index_collections(): void
+    {
+        $evm_chains = ChainRepository::getActive('evm');
+
+        foreach ($evm_chains as $chain) {
+            try {
+                if (!FetcherFactory::has_driver($chain->chain_type)) {
+                    continue;
+                }
+
+                $fetcher = FetcherFactory::make_for_chain($chain);
+
+                if (!method_exists($fetcher, 'fetch_top_collections')) {
+                    continue;
+                }
+
+                $collections = $fetcher->fetch_top_collections(100);
+
+                if (!empty($collections)) {
+                    $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
+                    error_log("[BCC Onchain] Indexed {$count} collections for {$chain->name}");
+                }
+            } catch (\Exception $e) {
+                error_log("[BCC Onchain] Collection index failed for {$chain->name}: " . $e->getMessage());
             }
         }
     }

@@ -69,6 +69,124 @@ final class CollectionRepository
     }
 
     /**
+     * Bulk-upsert collections for a chain (no wallet_link_id required).
+     * Used by the chain-level indexing cron. Matches on (chain_id, contract_address).
+     *
+     * @param array[] $collections Normalized collection rows from fetch_top_collections().
+     * @param int     $ttlSeconds  TTL for expires_at.
+     * @return int Number of rows written.
+     */
+    public static function bulkUpsert(array $collections, int $ttlSeconds = 4 * HOUR_IN_SECONDS): int
+    {
+        if (empty($collections)) {
+            return 0;
+        }
+
+        global $wpdb;
+        $table     = self::table();
+        $expiresAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+        $now       = current_time('mysql', true);
+        $count     = 0;
+
+        foreach ($collections as $data) {
+            $result = $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$table}
+                    (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
+                     total_supply, floor_price, floor_currency, unique_holders, total_volume,
+                     listed_percentage, royalty_percentage, metadata_storage, image_url,
+                     fetched_at, expires_at)
+                 VALUES (NULL, %s, %d, %s, %s, %d, %f, %s, %d, %f, %f, %f, %s, %s, %s, %s)
+                 ON DUPLICATE KEY UPDATE
+                    collection_name    = VALUES(collection_name),
+                    token_standard     = VALUES(token_standard),
+                    total_supply       = VALUES(total_supply),
+                    floor_price        = VALUES(floor_price),
+                    unique_holders     = VALUES(unique_holders),
+                    total_volume       = VALUES(total_volume),
+                    listed_percentage  = VALUES(listed_percentage),
+                    royalty_percentage  = VALUES(royalty_percentage),
+                    image_url          = VALUES(image_url),
+                    fetched_at         = VALUES(fetched_at),
+                    expires_at         = VALUES(expires_at)",
+                $data['contract_address'],
+                (int) $data['chain_id'],
+                $data['collection_name'] ?? null,
+                $data['token_standard'] ?? null,
+                $data['total_supply'] ?? null,
+                $data['floor_price'] ?? null,
+                $data['floor_currency'] ?? null,
+                $data['unique_holders'] ?? null,
+                $data['total_volume'] ?? null,
+                $data['listed_percentage'] ?? null,
+                $data['royalty_percentage'] ?? null,
+                $data['metadata_storage'] ?? null,
+                $data['image_url'] ?? null,
+                $now,
+                $expiresAt
+            ));
+
+            if ($result !== false) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * Get top collections globally (not per-project). Used by the discovery
+     * collection leaderboard and "Claim Your Community" feed.
+     *
+     * @return array{items: array, total: int, pages: int}
+     */
+    public static function getTopCollections(int $page = 1, int $perPage = 20, string $orderBy = 'total_volume', ?int $chainId = null): array
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $allowedOrder = ['total_volume', 'floor_price', 'unique_holders', 'total_supply'];
+        if (!in_array($orderBy, $allowedOrder, true)) {
+            $orderBy = 'total_volume';
+        }
+
+        $offset = ($page - 1) * $perPage;
+
+        $where  = '1=1';
+        $params = [];
+
+        if ($chainId) {
+            $where   .= ' AND c.chain_id = %d';
+            $params[] = $chainId;
+        }
+
+        $countSql = "SELECT COUNT(*) FROM {$table} c WHERE {$where}";
+        $mainSql  = "SELECT c.*, ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
+                     FROM {$table} c
+                     JOIN {$chains} ch ON ch.id = c.chain_id
+                     WHERE {$where}
+                     ORDER BY c.{$orderBy} DESC
+                     LIMIT %d OFFSET %d";
+
+        $countParams = $params;
+        $mainParams  = array_merge($params, [$perPage, $offset]);
+
+        $total = empty($countParams)
+            ? (int) $wpdb->get_var($countSql)
+            : (int) $wpdb->get_var($wpdb->prepare($countSql, ...$countParams));
+
+        $items = empty($mainParams)
+            ? $wpdb->get_results($mainSql)
+            : $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
+
+        return [
+            'items' => $items ?: [],
+            'total' => $total,
+            'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
+        ];
+    }
+
+    /**
      * @param bool $includeHidden If true, returns all collections regardless of show_on_profile.
      *                            Used by the page owner's dashboard. Public views pass false.
      * @return array{items: array, total: int, pages: int}

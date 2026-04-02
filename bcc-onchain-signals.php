@@ -51,7 +51,7 @@ use BCC\Onchain\Services\ChainRefreshService;
 use BCC\Onchain\Controllers\WalletController;
 use BCC\Onchain\Admin\SettingsPage;
 
-define('BCC_ONCHAIN_VERSION', '1.5.0');
+define('BCC_ONCHAIN_VERSION', '1.6.0');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 
@@ -169,12 +169,31 @@ function bcc_onchain_boot(): void {
         }
     });
 
-    // ── Manual cron trigger (admin only): ?bcc_run_index_validators=1 on any admin page
+    // ── Manual cron triggers (admin only) ────────────────────────────────────
+    //   ?bcc_run_index_validators=1   → bulk index all Cosmos validators
+    //   ?bcc_run_index_collections=1  → bulk index top NFT collections
+    //   ?bcc_run_index_all=1          → both
     add_action('admin_init', function () {
-        if (!empty($_GET['bcc_run_index_validators']) && current_user_can('manage_options')) {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $ran = [];
+
+        if (!empty($_GET['bcc_run_index_validators']) || !empty($_GET['bcc_run_index_all'])) {
             ChainRefreshService::index_validators();
-            add_action('admin_notices', function () {
-                echo '<div class="notice notice-success is-dismissible"><p><strong>BCC On-Chain:</strong> Validator indexing complete. Check the onchain_validators table.</p></div>';
+            $ran[] = 'validators';
+        }
+
+        if (!empty($_GET['bcc_run_index_collections']) || !empty($_GET['bcc_run_index_all'])) {
+            ChainRefreshService::index_collections();
+            $ran[] = 'collections';
+        }
+
+        if (!empty($ran)) {
+            $label = implode(' + ', $ran);
+            add_action('admin_notices', function () use ($label) {
+                echo '<div class="notice notice-success is-dismissible"><p><strong>BCC On-Chain:</strong> Indexing complete (' . esc_html($label) . '). Check the database tables.</p></div>';
             });
         }
     });
