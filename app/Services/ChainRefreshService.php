@@ -161,17 +161,27 @@ class ChainRefreshService
         }
     }
 
-    // ── Validator Refresh (per-row — enriches expired validators) ─────────
+    // ── Validator Refresh (per-row — enriches with uptime, self-stake, governance) ──
 
+    /**
+     * Enrich validators that are missing data (bulk-indexed) or expired.
+     *
+     * Prioritizes rows with NULL self_stake/uptime (never enriched) over
+     * merely expired rows. Uses enrichByOperator() which matches on
+     * (chain_id, operator_address) — works regardless of wallet_link_id.
+     *
+     * Batch size: 100 (up from 50). Each validator = 5 LCD calls,
+     * so 100 × 5 = 500 calls/hour — within rate limits for public LCD.
+     */
     public static function refresh_validators(): void
     {
-        $expired = ValidatorRepository::getExpired(self::BATCH_SIZE);
+        $rows = ValidatorRepository::getNeedingEnrichment(100);
 
-        if (empty($expired)) {
+        if (empty($rows)) {
             return;
         }
 
-        foreach ($expired as $row) {
+        foreach ($rows as $row) {
             try {
                 $chain = ChainRepository::getById((int) $row->chain_id);
                 if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
@@ -187,7 +197,7 @@ class ChainRefreshService
                 $data = $fetcher->fetch_validator($row->operator_address);
 
                 if (!empty($data)) {
-                    ValidatorRepository::upsert($data, (int) $row->wallet_link_id, HOUR_IN_SECONDS);
+                    ValidatorRepository::enrichByOperator($data, HOUR_IN_SECONDS);
                 }
             } catch (\Exception $e) {
                 error_log("BCC Refresh: Validator {$row->operator_address} failed — " . $e->getMessage());

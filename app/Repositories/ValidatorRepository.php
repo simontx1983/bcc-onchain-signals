@@ -64,6 +64,86 @@ final class ValidatorRepository
     }
 
     /**
+     * Enrich a validator row with expensive per-validator data.
+     * Matches by (chain_id, operator_address) — works for both
+     * wallet-linked and bulk-indexed (NULL wallet_link_id) rows.
+     *
+     * Only updates columns that have non-null values in $data,
+     * preserving existing data for fields the fetcher didn't return.
+     */
+    public static function enrichByOperator(array $data, int $ttlSeconds = HOUR_IN_SECONDS): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $sets   = [];
+        $params = [];
+
+        $enrichable = [
+            'self_stake'               => '%f',
+            'delegator_count'          => '%d',
+            'uptime_30d'               => '%f',
+            'governance_participation' => '%f',
+            'moniker'                  => '%s',
+            'status'                   => '%s',
+            'commission_rate'          => '%f',
+            'total_stake'              => '%f',
+            'jailed_count'             => '%d',
+            'voting_power_rank'        => '%d',
+        ];
+
+        foreach ($enrichable as $col => $fmt) {
+            if (isset($data[$col]) && $data[$col] !== null) {
+                $sets[]   = "{$col} = {$fmt}";
+                $params[] = $data[$col];
+            }
+        }
+
+        if (empty($sets)) {
+            return false;
+        }
+
+        // Always update timestamps.
+        $sets[]   = 'fetched_at = %s';
+        $params[] = current_time('mysql', true);
+        $sets[]   = 'expires_at = %s';
+        $params[] = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+
+        // WHERE clause.
+        $params[] = (int) $data['chain_id'];
+        $params[] = $data['operator_address'];
+
+        $sql = "UPDATE {$table} SET " . implode(', ', $sets)
+             . " WHERE chain_id = %d AND operator_address = %s";
+
+        $result = $wpdb->query($wpdb->prepare($sql, ...$params));
+        return $result !== false;
+    }
+
+    /**
+     * Get validators that need enrichment — expired OR missing key data.
+     * Returns rows where uptime/self_stake/governance are still NULL
+     * (bulk-indexed but never enriched) or where expires_at has passed.
+     */
+    public static function getNeedingEnrichment(int $limit = 50): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT * FROM {$table}
+             WHERE expires_at < NOW()
+                OR self_stake IS NULL
+                OR uptime_30d IS NULL
+             ORDER BY
+                CASE WHEN self_stake IS NULL THEN 0 ELSE 1 END ASC,
+                expires_at ASC
+             LIMIT %d",
+            $limit
+        ));
+    }
+
+    /**
      * Bulk-upsert validators for a chain (no wallet_link_id required).
      * Used by the chain-level indexing cron. Matches on (chain_id, operator_address).
      *
@@ -189,7 +269,15 @@ final class ValidatorRepository
      *
      * @return array{items: array, total: int, pages: int}
      */
-    public static function getTopValidators(int $page = 1, int $perPage = 20, string $orderBy = 'total_stake', ?int $chainId = null): array
+    /**
+     * @param int         $page
+     * @param int         $perPage
+     * @param string      $orderBy
+     * @param int|null    $chainId    Filter by chain.
+     * @param string|null $timeWindow Filter by fetched_at window: '1h','6h','12h','1d','7d','30d'. Null = all.
+     * @return array{items: array, total: int, pages: int}
+     */
+    public static function getTopValidators(int $page = 1, int $perPage = 20, string $orderBy = 'total_stake', ?int $chainId = null, ?string $timeWindow = null): array
     {
         global $wpdb;
         $table  = self::table();
@@ -209,6 +297,16 @@ final class ValidatorRepository
         if ($chainId) {
             $where   .= ' AND v.chain_id = %d';
             $params[] = $chainId;
+        }
+
+        // Time window filter — show validators fetched within this period.
+        $windowMap = [
+            '1h'  => 1,      '6h'  => 6,       '12h' => 12,
+            '1d'  => 24,     '7d'  => 24 * 7,   '30d' => 24 * 30,
+        ];
+        if ($timeWindow && isset($windowMap[$timeWindow])) {
+            $where   .= ' AND v.fetched_at >= DATE_SUB(NOW(), INTERVAL %d HOUR)';
+            $params[] = $windowMap[$timeWindow];
         }
 
         $countSql = "SELECT COUNT(*) FROM {$table} v WHERE {$where}";

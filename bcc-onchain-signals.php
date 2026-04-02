@@ -202,6 +202,11 @@ function bcc_onchain_boot(): void {
             $ran[] = 'collections';
         }
 
+        if (!empty($_GET['bcc_run_enrich_validators']) || !empty($_GET['bcc_run_index_all'])) {
+            ChainRefreshService::refresh_validators();
+            $ran[] = 'validator enrichment';
+        }
+
         if (!empty($ran)) {
             $label = implode(' + ', $ran);
             add_action('admin_notices', function () use ($label) {
