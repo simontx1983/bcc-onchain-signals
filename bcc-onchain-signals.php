@@ -50,7 +50,7 @@ use BCC\Onchain\Services\ChainRefreshService;
 use BCC\Onchain\Controllers\WalletController;
 use BCC\Onchain\Admin\SettingsPage;
 
-define('BCC_ONCHAIN_VERSION', '1.3.0');
+define('BCC_ONCHAIN_VERSION', '1.4.0');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 
@@ -476,6 +476,13 @@ function bcc_onchain_fetch_and_store_wallet(int $user_id, int $page_id, string $
  *   holder:           +1.0
  */
 function bcc_onchain_apply_claim_bonus(int $userId, string $entityType, int $entityId, string $role): void {
+    // Guard: table functions must exist (schema migration must have run).
+    if (!function_exists('bcc_onchain_claims_table')
+        || !function_exists('bcc_onchain_validators_table')
+    ) {
+        return;
+    }
+
     global $wpdb;
 
     $bonusMap = [
