@@ -169,6 +169,16 @@ function bcc_onchain_boot(): void {
         }
     });
 
+    // ── Manual cron trigger (admin only): ?bcc_run_index_validators=1 on any admin page
+    add_action('admin_init', function () {
+        if (!empty($_GET['bcc_run_index_validators']) && current_user_can('manage_options')) {
+            ChainRefreshService::index_validators();
+            add_action('admin_notices', function () {
+                echo '<div class="notice notice-success is-dismissible"><p><strong>BCC On-Chain:</strong> Validator indexing complete. Check the onchain_validators table.</p></div>';
+            });
+        }
+    });
+
     // ── Admin settings page ─────────────────────────────────────────────────────
     add_action('admin_menu', function () {
         SettingsPage::register_page();
