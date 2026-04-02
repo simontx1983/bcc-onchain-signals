@@ -43,6 +43,7 @@ use BCC\Core\PeepSo\PeepSo;
 use BCC\Core\ServiceLocator;
 use BCC\Onchain\Repositories\CollectionRepository;
 use BCC\Onchain\Repositories\SignalRepository;
+use BCC\Onchain\Repositories\ValidatorRepository;
 use BCC\Onchain\Repositories\WalletRepository;
 use BCC\Onchain\Services\SignalFetcher;
 use BCC\Onchain\Services\SignalScorer;
@@ -243,23 +244,39 @@ function bcc_onchain_boot(): void {
             }
         }
 
-        // Seed NFT collection data on first wallet verification (all chains).
+        // Seed on-chain entity data on first wallet verification.
         // Runs after signal fetch so the wallet_link row exists.
         $chainObj = \BCC\Onchain\Repositories\ChainRepository::getBySlug($chain);
         if ($chainObj && \BCC\Onchain\Factories\FetcherFactory::has_driver($chainObj->chain_type)) {
             $fetcher = \BCC\Onchain\Factories\FetcherFactory::make_for_chain($chainObj);
-            if ($fetcher->supports_feature('collection')) {
-                $wallets = WalletRepository::getForUser($user_id);
-                foreach ($wallets as $w) {
-                    if (strtolower($w->wallet_address) === strtolower($address)) {
-                        $collections = $fetcher->fetch_collections($address, (int) $chainObj->id);
-                        foreach ($collections as $c) {
-                            CollectionRepository::upsert($c, (int) $w->id, 4 * HOUR_IN_SECONDS);
-                        }
-                        if (!empty($collections) && (int) $w->post_id > 0) {
-                            \BCC\Onchain\Services\CollectionService::invalidate((int) $w->post_id);
-                        }
-                        break;
+
+            // Find the wallet_link row for this address.
+            $walletLink = null;
+            $wallets = WalletRepository::getForUser($user_id);
+            foreach ($wallets as $w) {
+                if (strtolower($w->wallet_address) === strtolower($address)) {
+                    $walletLink = $w;
+                    break;
+                }
+            }
+
+            if ($walletLink) {
+                // Seed validator data (Cosmos chains).
+                if ($fetcher->supports_feature('validator')) {
+                    $validatorData = $fetcher->fetch_validator($address);
+                    if (!empty($validatorData)) {
+                        ValidatorRepository::upsert($validatorData, (int) $walletLink->id, HOUR_IN_SECONDS);
+                    }
+                }
+
+                // Seed NFT collection data (all chains).
+                if ($fetcher->supports_feature('collection')) {
+                    $collections = $fetcher->fetch_collections($address, (int) $chainObj->id);
+                    foreach ($collections as $c) {
+                        CollectionRepository::upsert($c, (int) $walletLink->id, 4 * HOUR_IN_SECONDS);
+                    }
+                    if (!empty($collections) && (int) $walletLink->post_id > 0) {
+                        \BCC\Onchain\Services\CollectionService::invalidate((int) $walletLink->post_id);
                     }
                 }
             }
