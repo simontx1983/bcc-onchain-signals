@@ -39,11 +39,14 @@ function bcc_onchain_create_validators_table(): void {
         self_stake DECIMAL(30,8) DEFAULT NULL,
         delegator_count INT UNSIGNED DEFAULT NULL,
         uptime_30d DECIMAL(5,2) DEFAULT NULL,
-        governance_participation DECIMAL(5,2) DEFAULT NULL,
         jailed_count INT UNSIGNED DEFAULT 0,
         voting_power_rank INT UNSIGNED DEFAULT NULL,
         fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME NOT NULL,
+        last_enriched_at DATETIME DEFAULT NULL,
+        next_enrichment_at DATETIME DEFAULT NULL,
+        retry_after DATETIME DEFAULT NULL,
+        enrichment_attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
         PRIMARY KEY (id),
         KEY wallet_link_id (wallet_link_id),
         KEY chain_id (chain_id),
@@ -51,10 +54,25 @@ function bcc_onchain_create_validators_table(): void {
         KEY operator_address (operator_address),
         KEY expires_at (expires_at),
         KEY status (status),
-        KEY voting_power_rank (voting_power_rank)
+        KEY voting_power_rank (voting_power_rank),
+        KEY idx_enrichment_schedule (next_enrichment_at, retry_after)
     ) {$charset_collate};";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
+
+    // Migrate existing rows: stagger next_enrichment_at so they don't all
+    // fire on the first cron tick after upgrade.
+    $col_exists = $wpdb->get_var(
+        "SELECT COUNT(*) FROM {$table} WHERE next_enrichment_at IS NOT NULL LIMIT 1"
+    );
+    if ((int) $col_exists === 0) {
+        $wpdb->query(
+            "UPDATE {$table}
+             SET next_enrichment_at = DATE_ADD(NOW(), INTERVAL FLOOR(RAND() * 14400) SECOND),
+                 last_enriched_at   = fetched_at
+             WHERE next_enrichment_at IS NULL"
+        );
+    }
 }
 

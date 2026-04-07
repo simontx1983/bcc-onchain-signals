@@ -72,18 +72,6 @@ final class ChainRepository
         return $chain ? (int) $chain->id : null;
     }
 
-    /**
-     * Flush the active-chains cache.
-     *
-     * Call this after any direct INSERT/UPDATE/DELETE on the chains table
-     * (e.g. admin settings, migration seeds, WP-CLI commands).
-     */
-    public static function invalidateCache(): void
-    {
-        wp_cache_delete('active_all', self::CACHE_GROUP);
-        delete_transient('bcc_active_chains');
-    }
-
     // ──────────────────────────────────────────────────────────
     //  Internal
     // ──────────────────────────────────────────────────────────

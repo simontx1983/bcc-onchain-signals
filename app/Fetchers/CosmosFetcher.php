@@ -6,7 +6,6 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
 use BCC\Onchain\Support\ApiRetry;
 
@@ -19,7 +18,7 @@ use BCC\Onchain\Support\ApiRetry;
  * NFT collections: Cosmos SDK chains may have CW-721 NFTs (e.g. Stargaze)
  * but no standardized LCD endpoint exists for discovery. Returns empty.
  */
-class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
+class CosmosFetcher implements FetcherInterface
 {
     private object $chain;
     private string $rest_url;

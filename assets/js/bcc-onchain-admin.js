@@ -32,7 +32,6 @@
             .then(data => {
                 statusEl.style.color = '#00a32a';
                 statusEl.textContent = `Done — refreshed ${data.refreshed} wallet(s).`;
-                console.log('[BCC On-chain] signals:', data.signals);
             })
             .catch(err => {
                 statusEl.style.color = '#d63638';

@@ -6,7 +6,6 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
 use BCC\Onchain\Support\ApiRetry;
 
@@ -19,7 +18,7 @@ use BCC\Onchain\Support\ApiRetry;
  *
  * Requires BCC_ETHERSCAN_API_KEY defined in wp-config.php.
  */
-class EvmFetcher implements FetcherInterface, CollectionFetcherInterface
+class EvmFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 12;
 
@@ -51,8 +50,6 @@ class EvmFetcher implements FetcherInterface, CollectionFetcherInterface
      * Strategy: query Etherscan "tokennfttx" for outbound ERC-721/1155
      * transfers where from=0x0 (mints) and contractAddress was deployed
      * by this address. Groups results by contract.
-     *
-     * Implements both FetcherInterface (1-param) and CollectionFetcherInterface (2-param).
      *
      * @param string $walletAddress  Wallet address to query.
      * @param int    $chainId        Chain ID override (ignored — uses $this->chain->id).

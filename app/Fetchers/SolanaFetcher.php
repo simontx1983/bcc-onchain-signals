@@ -6,7 +6,6 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
 use BCC\Onchain\Support\ApiRetry;
 
@@ -17,7 +16,7 @@ use BCC\Onchain\Support\ApiRetry;
  *  - Validators via getVoteAccounts RPC method
  *  - NFT collections via getAssetsByOwner DAS API
  */
-class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
+class SolanaFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 30;
     private const SOLANA_RPC   = 'https://api.mainnet-beta.solana.com';

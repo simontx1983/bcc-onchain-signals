@@ -15,7 +15,7 @@ if (!defined('ABSPATH')) {
 
 class ClaimRepository {
 
-    private static function table(): string {
+    public static function table(): string {
         return bcc_onchain_claims_table();
     }
 
@@ -209,27 +209,4 @@ class ClaimRepository {
         return $map;
     }
 
-    /**
-     * Get all claims by a user.
-     */
-    public static function getForUser(int $userId): array {
-        global $wpdb;
-        $table = self::table();
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$table} WHERE user_id = %d ORDER BY created_at DESC",
-            $userId
-        ));
-    }
-
-    /**
-     * Revoke a claim.
-     */
-    public static function revoke(int $claimId, int $userId): bool {
-        global $wpdb;
-        return (bool) $wpdb->delete(self::table(), [
-            'id'      => $claimId,
-            'user_id' => $userId,
-        ], ['%d', '%d']);
-    }
 }

@@ -16,26 +16,6 @@ final class WalletRepository
     }
 
     /**
-     * @return int Inserted row ID, or 0 on failure.
-     */
-    public static function insert(array $data): int
-    {
-        global $wpdb;
-        $table = self::table();
-
-        $inserted = $wpdb->insert($table, [
-            'user_id'        => (int) $data['user_id'],
-            'post_id'        => (int) $data['post_id'],
-            'wallet_address' => sanitize_text_field($data['wallet_address']),
-            'chain_id'       => (int) $data['chain_id'],
-            'wallet_type'    => sanitize_text_field($data['wallet_type'] ?? 'user'),
-            'label'          => isset($data['label']) ? sanitize_text_field($data['label']) : null,
-        ], ['%d', '%d', '%s', '%d', '%s', '%s']);
-
-        return $inserted ? (int) $wpdb->insert_id : 0;
-    }
-
-    /**
      * Atomic insert-or-find using INSERT ... ON DUPLICATE KEY UPDATE.
      *
      * Relies on the UNIQUE KEY user_chain_wallet (user_id, chain_id, wallet_address).

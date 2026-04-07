@@ -14,6 +14,15 @@
 
     const { ajaxUrl, nonce, chains, i18n } = bccWallet;
 
+    function escHtml(str) {
+        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function safeUrl(url) {
+        try { var u = new URL(url); return (u.protocol === 'https:' || u.protocol === 'http:') ? url : '#'; }
+        catch (_) { return '#'; }
+    }
+
     // ── Wallet Providers ─────────────────────────────────────────────────────
 
     const providers = {
@@ -297,7 +306,7 @@
             const parentEcoBtn = ecosystem?.querySelector('.bcc-ecosystem-btn');
 
             btn.disabled = true;
-            const origHTML = btn.innerHTML;
+            const origText = btn.textContent;
             btn.textContent = i18n.signing;
             if (parentEcoBtn && parentEcoBtn !== btn) {
                 parentEcoBtn.disabled = true;
@@ -320,7 +329,7 @@
 
                 // After 2s, reset the button so another chain can be connected
                 setTimeout(() => {
-                    btn.innerHTML = origHTML;
+                    btn.textContent = origText;
                     btn.classList.remove('bcc-wallet-verified');
                     btn.disabled = false;
 
@@ -344,7 +353,7 @@
                 btn.textContent = err.message;
 
                 setTimeout(() => {
-                    btn.innerHTML = origHTML;
+                    btn.textContent = origText;
                     btn.classList.remove('bcc-wallet-error');
                     btn.disabled = false;
                     if (parentEcoBtn && parentEcoBtn !== btn) {
@@ -432,32 +441,33 @@
             }
 
             panel.innerHTML = wallets.map(w => {
-                const shortAddr = w.wallet_address.slice(0, 6) + '…' + w.wallet_address.slice(-4);
+                const addr = escHtml(w.wallet_address);
+                const shortAddr = escHtml(w.wallet_address.slice(0, 6) + '…' + w.wallet_address.slice(-4));
                 const explorerLink = w.explorer_url
-                    ? `<a href="${w.explorer_url}/address/${w.wallet_address}" target="_blank" rel="noopener">${shortAddr}</a>`
+                    ? `<a href="${safeUrl(w.explorer_url + '/address/' + w.wallet_address)}" target="_blank" rel="noopener">${shortAddr}</a>`
                     : shortAddr;
                 const primaryBadge = w.is_primary ? '<span class="bcc-badge bcc-badge-primary">Primary</span>' : '';
-                const typeBadge = w.wallet_type !== 'user' ? `<span class="bcc-badge bcc-badge-type">${w.wallet_type}</span>` : '';
+                const typeBadge = w.wallet_type !== 'user' ? `<span class="bcc-badge bcc-badge-type">${escHtml(w.wallet_type)}</span>` : '';
                 const verifiedBadge = w.verified ? '<span class="bcc-badge bcc-badge-verified">Verified</span>' : '';
 
                 return `
-                    <div class="bcc-wallet-row" data-wallet-id="${w.id}">
+                    <div class="bcc-wallet-row" data-wallet-id="${escHtml(w.id)}">
                         <div class="bcc-wallet-info">
-                            <span class="bcc-wallet-chain">${w.chain_name}</span>
+                            <span class="bcc-wallet-chain">${escHtml(w.chain_name)}</span>
                             <span class="bcc-wallet-address">${explorerLink}</span>
                             ${primaryBadge}${typeBadge}${verifiedBadge}
-                            ${w.label ? `<span class="bcc-wallet-label">${w.label}</span>` : ''}
+                            ${w.label ? `<span class="bcc-wallet-label">${escHtml(w.label)}</span>` : ''}
                         </div>
                         <div class="bcc-wallet-actions">
-                            ${!w.is_primary ? `<button class="bcc-wallet-set-primary" data-wallet-id="${w.id}">Set Primary</button>` : ''}
-                            <button class="bcc-wallet-disconnect" data-wallet-id="${w.id}">${i18n.disconnect}</button>
+                            ${!w.is_primary ? `<button class="bcc-wallet-set-primary" data-wallet-id="${escHtml(w.id)}">Set Primary</button>` : ''}
+                            <button class="bcc-wallet-disconnect" data-wallet-id="${escHtml(w.id)}">${escHtml(i18n.disconnect)}</button>
                         </div>
                     </div>
                 `;
             }).join('');
 
         } catch (err) {
-            panel.innerHTML = `<p class="bcc-wallet-error">${err.message}</p>`;
+            panel.innerHTML = `<p class="bcc-wallet-error">${escHtml(err.message)}</p>`;
         }
     }
 
