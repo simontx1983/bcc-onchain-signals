@@ -8,6 +8,7 @@ if (!defined('ABSPATH')) {
 
 use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Support\ApiRetry;
 
 /**
  * EVM Chain Fetcher
@@ -194,19 +195,22 @@ class EvmFetcher implements FetcherInterface, CollectionFetcherInterface
             $headers['x-api-key'] = BCC_RESERVOIR_API_KEY;
         }
 
-        $response = wp_remote_get($url, [
+        $response = ApiRetry::get($url, [
             'timeout' => 20,
             'headers' => $headers,
+        ], [
+            'label'    => 'Reservoir collections ' . $slug,
+            'chain_id' => $chainId,
         ]);
 
         if (is_wp_error($response)) {
-            error_log('[BCC Onchain] Reservoir fetch failed: ' . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] Reservoir fetch failed: ' . $response->get_error_message());
             return [];
         }
 
         $code = wp_remote_retrieve_response_code($response);
         if ($code !== 200) {
-            error_log("[BCC Onchain] Reservoir returned {$code} for {$slug}");
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] Reservoir returned ' . $code . ' for ' . $slug);
             return [];
         }
 
@@ -279,10 +283,18 @@ class EvmFetcher implements FetcherInterface, CollectionFetcherInterface
     private function etherscanGet(string $apiBase, array $params): ?array
     {
         $url      = add_query_arg($params, $apiBase);
-        $response = wp_remote_get($url, ['timeout' => self::HTTP_TIMEOUT, 'sslverify' => true]);
+        $chainId  = (int) $this->chain->id;
+
+        $response = ApiRetry::get($url, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'sslverify' => true,
+        ], [
+            'label'    => 'Etherscan ' . ($params['action'] ?? 'query'),
+            'chain_id' => $chainId,
+        ]);
 
         if (is_wp_error($response)) {
-            error_log('[BCC Onchain] EVM collection fetch failed: ' . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] Collection fetch failed: ' . $response->get_error_message());
             return null;
         }
 

@@ -8,26 +8,30 @@ if (!defined('ABSPATH')) {
 
 use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Support\ApiRetry;
 
 /**
  * Solana Chain Fetcher
  *
- * Fetches NFT collection data via the Solana public RPC (getAssetsByOwner DAS).
- * Falls back to getSignaturesForAddress + getParsedTransaction when the DAS
- * API is unavailable on the configured RPC.
- *
- * No API key required — uses the public mainnet RPC.
+ * Supports:
+ *  - Validators via getVoteAccounts RPC method
+ *  - NFT collections via getAssetsByOwner DAS API
  */
 class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
 {
-    private const HTTP_TIMEOUT = 12;
+    private const HTTP_TIMEOUT = 30;
     private const SOLANA_RPC   = 'https://api.mainnet-beta.solana.com';
 
     private object $chain;
+    private string $rpc_url;
+
+    /** @var array|null Cached vote accounts for the current PHP process. */
+    private static ?array $voteAccountsCache = null;
 
     public function __construct(object $chain)
     {
-        $this->chain = $chain;
+        $this->chain   = $chain;
+        $this->rpc_url = $chain->rpc_url ?? self::SOLANA_RPC;
     }
 
     public function get_chain(): object
@@ -37,51 +41,90 @@ class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return $feature === 'collection';
+        return in_array($feature, ['validator', 'collection'], true);
     }
 
+    // ══════════════════════════════════════════════════════════════════
+    // VALIDATORS
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * Fetch a single validator by identity pubkey.
+     */
     public function fetch_validator(string $address): array
     {
-        return []; // Solana validator data requires specialized RPC calls not supported here
+        $all = $this->getVoteAccounts();
+
+        foreach ($all as $v) {
+            if (($v['nodePubkey'] ?? '') === $address) {
+                return $this->mapValidator($v, 0);
+            }
+        }
+
+        return [];
     }
 
     /**
+     * Fetch all active validators sorted by stake descending.
+     */
+    public function fetch_all_validators(): array
+    {
+        $accounts = $this->getVoteAccounts();
+
+        if (empty($accounts)) {
+            return [];
+        }
+
+        // Sort by activatedStake descending for rank.
+        usort($accounts, function ($a, $b) {
+            return bccomp($b['activatedStake'] ?? '0', $a['activatedStake'] ?? '0');
+        });
+
+        $results = [];
+        foreach ($accounts as $rank => $v) {
+            $results[] = $this->mapValidator($v, $rank);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Enrich a validator. All data comes in one getVoteAccounts call,
+     * so this just re-fetches from the cached set.
+     */
+    public function enrich_validator(string $address, ?object $existingRow = null): array
+    {
+        return $this->fetch_validator($address);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // COLLECTIONS (existing functionality)
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
      * Fetch NFT collections associated with a Solana wallet.
-     *
-     * Uses getAssetsByOwner (DAS API) when available on the configured RPC.
-     * Groups assets by collection, returns normalized rows.
-     *
-     * @param string $walletAddress  Solana base58 wallet address.
-     * @param int    $chainId        Chain ID override (uses $this->chain->id if 0).
-     * @return array[] Normalized collection rows.
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         $chainId = $chainId ?: (int) $this->chain->id;
-        $rpc     = $this->chain->rpc_url ?? self::SOLANA_RPC;
 
-        // Try DAS API (getAssetsByOwner) — available on Helius, Triton, etc.
-        $assets = $this->rpcCall($rpc, 'getAssetsByOwner', [
-            'ownerAddress'  => $walletAddress,
+        $assets = $this->rpcCall('getAssetsByOwner', [
+            'ownerAddress'   => $walletAddress,
             'displayOptions' => ['showCollectionMetadata' => true],
-            'limit'         => 500,
-            'page'          => 1,
+            'limit'          => 500,
+            'page'           => 1,
         ]);
 
         if (!is_array($assets)) {
-            // DAS not available on this RPC — return empty gracefully.
-            // The public mainnet RPC doesn't support DAS; users need Helius/Triton.
             return [];
         }
 
-        // Group by collection mint authority / grouping key
         $collections = [];
 
         foreach ($assets as $asset) {
             $asset = (object) $asset;
             $grouping = $asset->grouping ?? [];
 
-            // Find the collection grouping
             $collectionAddr = null;
             foreach ($grouping as $g) {
                 $g = (object) $g;
@@ -98,7 +141,6 @@ class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
             $key = strtolower($collectionAddr);
 
             if (!isset($collections[$key])) {
-                // Extract collection metadata if available
                 $collMeta = null;
                 foreach ($grouping as $g) {
                     $g = (object) $g;
@@ -124,18 +166,14 @@ class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
                     '_count'             => 0,
                 ];
 
-                // Extract royalty if available
                 if (isset($asset->royalty->percent)) {
                     $collections[$key]['royalty_percentage'] = round((float) $asset->royalty->percent * 100, 2);
                 }
 
-                // Detect metadata storage from URI
                 $uri = $asset->content->json_uri ?? '';
                 if (str_contains($uri, 'arweave.net')) {
                     $collections[$key]['metadata_storage'] = 'arweave';
-                } elseif (str_contains($uri, 'ipfs')) {
-                    $collections[$key]['metadata_storage'] = 'ipfs';
-                } elseif (str_contains($uri, 'nftstorage.link')) {
+                } elseif (str_contains($uri, 'ipfs') || str_contains($uri, 'nftstorage.link')) {
                     $collections[$key]['metadata_storage'] = 'ipfs';
                 }
             }
@@ -143,7 +181,6 @@ class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
             $collections[$key]['_count']++;
         }
 
-        // Set total_supply from owned count (best approximation from owner data)
         $result = [];
         foreach ($collections as $coll) {
             unset($coll['_count']);
@@ -153,33 +190,121 @@ class SolanaFetcher implements FetcherInterface, CollectionFetcherInterface
         return $result;
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════
+    // INTERNAL
+    // ══════════════════════════════════════════════════════════════════
 
-    private function rpcCall(string $rpc, string $method, array $params): ?array
+    /**
+     * Get all vote accounts (cached per PHP process).
+     */
+    private function getVoteAccounts(): array
     {
+        if (self::$voteAccountsCache !== null) {
+            return self::$voteAccountsCache;
+        }
+
+        $result = $this->rpcCall('getVoteAccounts', []);
+
+        if (!is_array($result)) {
+            self::$voteAccountsCache = [];
+            return [];
+        }
+
+        // Merge current (active) and delinquent (inactive) into one list.
+        $current    = $result['current'] ?? [];
+        $delinquent = $result['delinquent'] ?? [];
+
+        // Mark delinquent validators.
+        foreach ($delinquent as &$v) {
+            $v['_delinquent'] = true;
+        }
+        unset($v);
+
+        self::$voteAccountsCache = array_merge($current, $delinquent);
+        return self::$voteAccountsCache;
+    }
+
+    /**
+     * Map a Solana vote account to the standard validator schema.
+     */
+    private function mapValidator(array $v, int $rank): array
+    {
+        $nodePubkey    = $v['nodePubkey'] ?? '';
+        $activatedStake = (float) ($v['activatedStake'] ?? 0) / 1e9; // lamports → SOL
+        $commission    = (float) ($v['commission'] ?? 0);
+        $isDelinquent  = !empty($v['_delinquent']);
+
+        // Moniker: truncated pubkey.
+        $moniker = $nodePubkey;
+        if (strlen($moniker) > 16) {
+            $moniker = substr($moniker, 0, 6) . '...' . substr($moniker, -4);
+        }
+
+        // Approximate uptime from epochCredits: if the validator has recent
+        // credits it's been actively voting. Delinquent = low/no uptime.
+        $uptime = null;
+        if ($isDelinquent) {
+            $uptime = 0.0;
+        } elseif (!empty($v['epochCredits'])) {
+            // Has been voting recently — approximate as high uptime.
+            $uptime = 99.0;
+        }
+
+        return [
+            'operator_address'  => $nodePubkey,
+            'chain_id'          => (int) $this->chain->id,
+            'moniker'           => $moniker,
+            'status'            => $isDelinquent ? 'inactive' : 'active',
+            'commission_rate'   => $commission,
+            'total_stake'       => round($activatedStake, 6),
+            'self_stake'        => null,
+            'delegator_count'   => null,
+            'uptime_30d'        => $uptime,
+            'jailed_count'      => 0,
+            'voting_power_rank' => $rank + 1,
+        ];
+    }
+
+    /**
+     * Make a JSON-RPC call to the Solana RPC endpoint.
+     */
+    private function rpcCall(string $method, array $params): ?array
+    {
+        $chainId  = (int) $this->chain->id;
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);
-        $response = wp_remote_post($rpc, [
+
+        $response = ApiRetry::post($this->rpc_url, [
             'timeout'   => self::HTTP_TIMEOUT,
             'headers'   => ['Content-Type' => 'application/json'],
             'body'      => $body,
             'sslverify' => true,
+        ], [
+            'label'    => 'Solana RPC ' . $method,
+            'chain_id' => $chainId,
         ]);
 
         if (is_wp_error($response)) {
+            \BCC\Core\Log\Logger::error('[Solana Fetcher] RPC error for ' . $method . ': ' . $response->get_error_message());
             return null;
         }
 
-        $json = json_decode(wp_remote_retrieve_body($response));
-
-        if (json_last_error() !== JSON_ERROR_NONE || !isset($json->result)) {
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code !== 200) {
+            \BCC\Core\Log\Logger::error('[Solana Fetcher] HTTP ' . $code . ' for ' . $method);
             return null;
         }
 
-        // DAS returns { result: { items: [...], total: int } }
-        if (isset($json->result->items) && is_array($json->result->items)) {
-            return $json->result->items;
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+
+        if (!is_array($json) || !isset($json['result'])) {
+            return null;
         }
 
-        return is_array($json->result) ? $json->result : null;
+        // DAS returns { result: { items: [...] } }
+        if (isset($json['result']['items']) && is_array($json['result']['items'])) {
+            return $json['result']['items'];
+        }
+
+        return is_array($json['result']) ? $json['result'] : null;
     }
 }

@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Core\ServiceLocator;
+use BCC\Onchain\Support\ApiRetry;
 
 /**
  * Fetches raw on-chain signals from Etherscan (Ethereum) and Solana public RPC.
@@ -44,7 +45,7 @@ class SignalFetcher
     public static function fetch(string $address, string $chain, bool $force = false): ?array
     {
         if (!self::validate_address($address, $chain)) {
-            error_log("[BCC On-chain] Invalid {$chain} address format: {$address}");
+            \BCC\Core\Log\Logger::error('[Onchain] Invalid ' . $chain . ' address format: ' . $address);
             return null;
         }
 
@@ -79,8 +80,8 @@ class SignalFetcher
      */
     public static function get_connected_wallets(int $user_id): array
     {
-        // NullWalletVerificationRead::getWalletsForUser() returns [] — same as old fallback.
-        return ServiceLocator::resolveWalletVerificationRead()->getWalletsForUser($user_id);
+        // NullWalletLinkRead::getLinksForUser() returns [] — same as old fallback.
+        return ServiceLocator::resolveWalletLinkRead()->getLinksForUser($user_id);
     }
 
     // ── Ethereum ──────────────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ class SignalFetcher
         $api_key = defined('BCC_ETHERSCAN_API_KEY') ? BCC_ETHERSCAN_API_KEY : '';
 
         if (!$api_key) {
-            error_log('[BCC On-chain] BCC_ETHERSCAN_API_KEY not defined in wp-config.php');
+            \BCC\Core\Log\Logger::error('[Onchain] BCC_ETHERSCAN_API_KEY not defined in wp-config.php');
         }
 
         $all_txs = self::etherscanRequest([
@@ -201,10 +202,16 @@ class SignalFetcher
     private static function etherscanRequestRaw(array $params): ?object
     {
         $url      = add_query_arg($params, self::ETHERSCAN_BASE);
-        $response = wp_remote_get($url, ['timeout' => self::HTTP_TIMEOUT, 'sslverify' => true]);
+
+        $response = ApiRetry::get($url, [
+            'timeout'   => self::HTTP_TIMEOUT,
+            'sslverify' => true,
+        ], [
+            'label' => 'Etherscan signal ' . ($params['action'] ?? 'query'),
+        ]);
 
         if (is_wp_error($response)) {
-            error_log('[BCC On-chain] Etherscan request failed: ' . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[Onchain] Etherscan request failed: ' . $response->get_error_message());
             return null;
         }
 
@@ -212,7 +219,7 @@ class SignalFetcher
         $json = json_decode($body);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
-            error_log('[BCC On-chain] Etherscan JSON decode error');
+            \BCC\Core\Log\Logger::error('[Onchain] Etherscan JSON decode error');
             return null;
         }
 
@@ -222,22 +229,25 @@ class SignalFetcher
     private static function solanaRpc(string $method, array $params): ?array
     {
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);
-        $response = wp_remote_post(self::SOLANA_RPC, [
+
+        $response = ApiRetry::post(self::SOLANA_RPC, [
             'timeout'     => self::HTTP_TIMEOUT,
             'headers'     => ['Content-Type' => 'application/json'],
             'body'        => $body,
             'sslverify'   => true,
+        ], [
+            'label' => 'Solana signal ' . $method,
         ]);
 
         if (is_wp_error($response)) {
-            error_log('[BCC On-chain] Solana RPC request failed: ' . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[Onchain] Solana RPC request failed: ' . $response->get_error_message());
             return null;
         }
 
         $json = json_decode(wp_remote_retrieve_body($response));
 
         if (json_last_error() !== JSON_ERROR_NONE || !isset($json->result)) {
-            error_log('[BCC On-chain] Solana RPC invalid response');
+            \BCC\Core\Log\Logger::error('[Onchain] Solana RPC invalid response');
             return null;
         }
 

@@ -12,6 +12,7 @@ use BCC\Onchain\Repositories\CollectionRepository;
 use BCC\Onchain\Repositories\ValidatorRepository;
 use BCC\Onchain\Repositories\WalletRepository;
 use BCC\Onchain\Services\CollectionService;
+use BCC\Onchain\Support\CircuitBreaker;
 
 /**
  * Chain Refresh Cron
@@ -83,6 +84,31 @@ class ChainRefreshService
         wp_clear_scheduled_hook('bcc_index_collections');
     }
 
+    // ── Locking ──────────────────────────────────────────────────────────────
+
+    private const LOCK_GROUP = 'bcc_cron';
+
+    /**
+     * Acquire an atomic Redis-backed lock for a cron job.
+     * wp_cache_add() only succeeds if the key doesn't exist — atomic.
+     */
+    private static function acquireLock(string $job, int $ttl = 900): bool
+    {
+        $acquired = wp_cache_add('lock_' . $job, time(), self::LOCK_GROUP, $ttl);
+
+        if (!$acquired) {
+            \BCC\Core\Log\Logger::info('[Onchain] Skipping ' . $job . ' — previous run still locked.');
+            return false;
+        }
+
+        return true;
+    }
+
+    private static function releaseLock(string $job): void
+    {
+        wp_cache_delete('lock_' . $job, self::LOCK_GROUP);
+    }
+
     // ── Validator Indexing (bulk — all validators per chain) ────────────────
 
     /**
@@ -97,9 +123,28 @@ class ChainRefreshService
      */
     public static function index_validators(): void
     {
-        $cosmos_chains = ChainRepository::getActive('cosmos');
+        if (!self::acquireLock('index_validators', 1800)) {
+            return;
+        }
 
-        foreach ($cosmos_chains as $chain) {
+        // Index all chain types that support validators.
+        $chains = array_merge(
+            ChainRepository::getActive('cosmos'),
+            ChainRepository::getActive('thorchain'),
+            ChainRepository::getActive('solana'),
+            ChainRepository::getActive('polkadot'),
+            ChainRepository::getActive('near')
+        );
+
+        foreach ($chains as $chain) {
+            $chainId = (int) $chain->id;
+
+            // Skip chains whose circuit breaker is open (consistently failing).
+            if (CircuitBreaker::isOpen($chainId)) {
+                \BCC\Core\Log\Logger::info('[Onchain] Skipping index for ' . $chain->name . ' — circuit breaker open');
+                continue;
+            }
+
             try {
                 if (!FetcherFactory::has_driver($chain->chain_type)) {
                     continue;
@@ -114,13 +159,39 @@ class ChainRefreshService
                 $validators = $fetcher->fetch_all_validators();
 
                 if (!empty($validators)) {
-                    $count = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
-                    error_log("[BCC Onchain] Indexed {$count} validators for {$chain->name}");
+                    $stats = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
+
+                    // Persist per-chain stats for the admin dashboard.
+                    $allStats = get_option('bcc_onchain_indexer_stats', []);
+                    $allStats[$chain->slug] = array_merge($stats, [
+                        'chain'     => $chain->name,
+                        'timestamp' => current_time('mysql', true),
+                    ]);
+                    update_option('bcc_onchain_indexer_stats', $allStats, false);
+
+                    \BCC\Core\Log\Logger::info(sprintf(
+                        '[Onchain] Indexed %s: %d total, %d new, %d updated, %d unchanged, %d refreshed',
+                        $chain->name, $stats['total'], $stats['new'], $stats['updated'],
+                        $stats['unchanged'], $stats['refreshed'] ?? 0
+                    ));
+
+                    CircuitBreaker::recordSuccess($chainId);
+                } else {
+                    // Empty result from an active chain is suspicious
+                    CircuitBreaker::recordFailure($chainId);
+                    \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                 }
             } catch (\Exception $e) {
-                error_log("[BCC Onchain] Validator index failed for {$chain->name}: " . $e->getMessage());
+                CircuitBreaker::recordFailure($chainId);
+                \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
             }
         }
+
+        // After indexing, clean up validators that the indexer hasn't seen
+        // in 30+ days and have exhausted retry attempts — they're gone.
+        EnrichmentScheduler::markDeadValidators();
+
+        self::releaseLock('index_validators');
     }
 
     // ── Collection Indexing (bulk — top NFT collections per EVM chain) ─────
@@ -135,9 +206,20 @@ class ChainRefreshService
      */
     public static function index_collections(): void
     {
+        if (!self::acquireLock('index_collections', 1800)) {
+            return;
+        }
+
         $evm_chains = ChainRepository::getActive('evm');
 
         foreach ($evm_chains as $chain) {
+            $chainId = (int) $chain->id;
+
+            if (CircuitBreaker::isOpen($chainId)) {
+                \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
+                continue;
+            }
+
             try {
                 if (!FetcherFactory::has_driver($chain->chain_type)) {
                     continue;
@@ -153,66 +235,49 @@ class ChainRefreshService
 
                 if (!empty($collections)) {
                     $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
-                    error_log("[BCC Onchain] Indexed {$count} collections for {$chain->name}");
+                    \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
+                    CircuitBreaker::recordSuccess($chainId);
                 }
             } catch (\Exception $e) {
-                error_log("[BCC Onchain] Collection index failed for {$chain->name}: " . $e->getMessage());
+                CircuitBreaker::recordFailure($chainId);
+                \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
             }
         }
+
+        self::releaseLock('index_collections');
     }
 
-    // ── Validator Refresh (per-row — enriches with uptime, self-stake, governance) ──
+    // ── Validator Refresh (scheduler-driven) ─────────────────────────────────
 
     /**
-     * Enrich validators that are missing data (bulk-indexed) or expired.
+     * Enrich validators via the EnrichmentScheduler.
      *
-     * Prioritizes rows with NULL self_stake/uptime (never enriched) over
-     * merely expired rows. Uses enrichByOperator() which matches on
-     * (chain_id, operator_address) — works regardless of wallet_link_id.
-     *
-     * Batch size: 100 (up from 50). Each validator = 5 LCD calls,
-     * so 100 × 5 = 500 calls/hour — within rate limits for public LCD.
+     * The scheduler handles: priority ordering, API budget control,
+     * retry/backoff, staggered scheduling, and Redis-based overlap prevention.
+     * This method is just the cron entry point.
      */
     public static function refresh_validators(): void
     {
-        $rows = ValidatorRepository::getNeedingEnrichment(100);
+        $stats = EnrichmentScheduler::run();
 
-        if (empty($rows)) {
-            return;
-        }
-
-        foreach ($rows as $row) {
-            try {
-                $chain = ChainRepository::getById((int) $row->chain_id);
-                if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
-                    continue;
-                }
-
-                $fetcher = FetcherFactory::make_for_chain($chain);
-
-                if (!$fetcher->supports_feature('validator')) {
-                    continue;
-                }
-
-                $data = $fetcher->fetch_validator($row->operator_address);
-
-                if (!empty($data)) {
-                    ValidatorRepository::enrichByOperator($data, HOUR_IN_SECONDS);
-                }
-            } catch (\Exception $e) {
-                error_log("BCC Refresh: Validator {$row->operator_address} failed — " . $e->getMessage());
-                self::backoffRow(ValidatorRepository::table(), (int) $row->id);
-            }
-        }
+        // Persist enrichment stats for the admin dashboard.
+        update_option('bcc_onchain_enrichment_stats', array_merge($stats, [
+            'timestamp' => current_time('mysql', true),
+        ]), false);
     }
 
     // ── Collection Refresh ──────────────────────────────────────────────────
 
     public static function refresh_collections(): void
     {
+        if (!self::acquireLock('refresh_collections', 900)) {
+            return;
+        }
+
         $expired = CollectionRepository::getExpired(self::BATCH_SIZE);
 
         if (empty($expired)) {
+            self::releaseLock('refresh_collections');
             return;
         }
 
@@ -237,18 +302,27 @@ class ChainRefreshService
 
                 $collections = $fetcher->fetch_collections($wallet->wallet_address, (int) $row->chain_id);
 
-                foreach ($collections as $collection) {
-                    CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS);
-                }
+                if (!empty($collections)) {
+                    foreach ($collections as $collection) {
+                        CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS);
+                    }
 
-                if (!empty($collections) && (int) $wallet->post_id > 0) {
-                    CollectionService::invalidate((int) $wallet->post_id);
+                    if ((int) $wallet->post_id > 0) {
+                        CollectionService::invalidate((int) $wallet->post_id);
+                    }
+                } else {
+                    // Empty response after retries — backoff to prevent tight re-fetch
+                    // loop on wallets with deleted collections or failing chain APIs.
+                    self::backoffRow(CollectionRepository::table(), (int) $row->id);
                 }
             } catch (\Exception $e) {
-                error_log("BCC Refresh: Collection {$row->contract_address} failed — " . $e->getMessage());
+                CircuitBreaker::recordFailure((int) $row->chain_id);
+                \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
                 self::backoffRow(CollectionRepository::table(), (int) $row->id);
             }
         }
+
+        self::releaseLock('refresh_collections');
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -262,7 +336,7 @@ class ChainRefreshService
 
         $allowed_prefix = $wpdb->prefix . 'bcc_';
         if (strpos($table, $allowed_prefix) !== 0) {
-            error_log('[BCC Onchain] Backoff rejected for untrusted table: ' . $table);
+            \BCC\Core\Log\Logger::error('[Onchain] Backoff rejected for untrusted table: ' . $table);
             return;
         }
 
@@ -274,7 +348,7 @@ class ChainRefreshService
         ));
 
         if ($result === false) {
-            error_log('[BCC Onchain] Backoff update failed for ' . $table . ' row ' . $row_id . ': ' . $wpdb->last_error);
+            \BCC\Core\Log\Logger::error('[Onchain] Backoff update failed for ' . $table . ' row ' . $row_id . ': ' . $wpdb->last_error);
         }
     }
 }

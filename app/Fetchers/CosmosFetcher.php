@@ -8,6 +8,7 @@ if (!defined('ABSPATH')) {
 
 use BCC\Onchain\Contracts\CollectionFetcherInterface;
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Support\ApiRetry;
 
 /**
  * Cosmos Chain Fetcher
@@ -22,12 +23,22 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
 {
     private object $chain;
     private string $rest_url;
+    private int    $decimals;
     private int $timeout = 15;
+
+    /**
+     * Static caches keyed by chain ID — shared across instances within the
+     * same PHP process so enrichment batches don't re-fetch identical data.
+     *
+     * @var array<int, array> Bonded validators sorted by tokens desc.
+     */
+    private static array $validatorListCache = [];
 
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
         $this->rest_url = rtrim($chain->rest_url ?? $chain->rpc_url, '/');
+        $this->decimals = (int) ($chain->decimals ?? 6);
     }
 
     public function get_chain(): object
@@ -46,12 +57,19 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
     {
         $valoper = $this->ensureValoperPrefix($address);
 
-        $validator = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}");
-        if (!$validator || !isset($validator['validator'])) {
-            return [];
-        }
+        // Reuse the cached bonded set when available (populated by
+        // fetch_all_validators or a prior enrichment call in the same
+        // cron batch). Falls back to an individual LCD call only if
+        // the validator isn't in the bonded cache (e.g. unbonded).
+        $val = $this->findInBondedCache($valoper);
 
-        $val = $validator['validator'];
+        if (!$val) {
+            $response = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}");
+            if (!$response || !isset($response['validator'])) {
+                return [];
+            }
+            $val = $response['validator'];
+        }
 
         $delegations = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}/delegations", [
             'pagination.limit'       => 1,
@@ -59,9 +77,8 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
         ]);
         $delegator_count = (int) ($delegations['pagination']['total'] ?? 0);
 
-        $uptime             = $this->fetchUptime($val);
-        $gov_participation  = $this->fetchGovernanceParticipation($valoper);
-        $voting_power_rank  = $this->fetchVotingPowerRank($valoper);
+        $uptime            = $this->fetchUptime($val);
+        $voting_power_rank = $this->fetchVotingPowerRank($valoper);
 
         $commission_rate = isset($val['commission']['commission_rates']['rate'])
             ? round((float) $val['commission']['commission_rates']['rate'] * 100, 2)
@@ -85,10 +102,136 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
             'self_stake'               => $self_stake,
             'delegator_count'          => $delegator_count,
             'uptime_30d'               => $uptime,
-            'governance_participation' => $gov_participation,
+
             'jailed_count'             => $jailed_count,
             'voting_power_rank'        => $voting_power_rank,
         ];
+    }
+
+    /**
+     * Enrichment-optimized fetch that skips expensive API calls when possible:
+     *
+     *  - self_stake:  skipped if total_stake unchanged (stake changes are rare)
+     *  - uptime_30d:  skipped if fetched < 24h ago (missed_blocks moves slowly)
+     *
+     * @param string  $address     Validator operator address.
+     * @param ?object $existingRow DB row from onchain_validators.
+     * @return array Same shape as fetch_validator().
+     */
+    public function enrich_validator(string $address, ?object $existingRow = null): array
+    {
+        $valoper = $this->ensureValoperPrefix($address);
+
+        $val = $this->findInBondedCache($valoper);
+
+        if (!$val) {
+            $response = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}");
+            if (!$response || !isset($response['validator'])) {
+                return [];
+            }
+            $val = $response['validator'];
+        }
+
+        $voting_power_rank = $this->fetchVotingPowerRank($valoper);
+
+        $commission_rate = isset($val['commission']['commission_rates']['rate'])
+            ? round((float) $val['commission']['commission_rates']['rate'] * 100, 2)
+            : null;
+
+        $total_stake = isset($val['tokens'])
+            ? $this->tokensToDisplay($val['tokens'])
+            : null;
+
+        // Age of the existing row — used by all skip-if-fresh checks below.
+        $fetchedAt = $existingRow->fetched_at ?? null;
+        $rowAge    = $fetchedAt ? (time() - strtotime($fetchedAt)) : PHP_INT_MAX;
+
+        // Deterministic jitter (0.0–1.0) seeded from the operator address.
+        // Spreads refresh times evenly across the window so validators don't
+        // all expire on the same cron tick (thundering herd prevention).
+        $jitter = (float) (crc32($valoper) & 0x7FFFFFFF) / 0x7FFFFFFF;
+
+        // ── Self-delegation: skip if total_stake unchanged ──────────────
+        $previousStake = $existingRow ? (float) ($existingRow->total_stake ?? 0) : 0.0;
+        $previousSelf  = $existingRow ? ($existingRow->self_stake ?? null) : null;
+        // Treat 0 as "never fetched" — no bonded validator has 0 self-delegation.
+        // Bug fix: bulkUpsert previously stored 0.00 instead of NULL for new rows.
+        $stakeChanged  = $previousSelf === null
+            || (float) $previousSelf === 0.0
+            || $total_stake === null
+            || abs($total_stake - $previousStake) > 0.01;
+
+        if ($stakeChanged) {
+            $self_stake = $this->fetchSelfDelegation($valoper);
+        } else {
+            $self_stake = (float) $previousSelf;
+        }
+
+        // ── Delegator count: skip if fetched < 5–9 days ago ─────────────
+        // Base window 7 days ± 2 days of jitter per validator.
+        $previousDelegators = $existingRow ? ($existingRow->delegator_count ?? null) : null;
+        $delegatorsTtl      = (int) ((5 + $jitter * 4) * DAY_IN_SECONDS);
+        // Treat 0 as "never fetched" — active validators always have >= 1 delegator (self).
+        $delegatorsStale    = $previousDelegators === null || (int) $previousDelegators === 0 || $rowAge >= $delegatorsTtl;
+
+        if ($delegatorsStale) {
+            $delegations = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}/delegations", [
+                'pagination.limit'       => 1,
+                'pagination.count_total' => 'true',
+            ]);
+            $delegator_count = (int) ($delegations['pagination']['total'] ?? 0);
+        } else {
+            $delegator_count = (int) $previousDelegators;
+        }
+
+        // ── Uptime: skip if fetched < 18–30h ago ────────────────────────
+        // Base window 24h ± 6h of jitter per validator.
+        $previousUptime = $existingRow ? ($existingRow->uptime_30d ?? null) : null;
+        $uptimeTtl      = (int) ((18 + $jitter * 12) * HOUR_IN_SECONDS);
+        // Treat 0 as "never fetched" — a bonded validator with 0% uptime would be
+        // slashed/jailed long before we see it. Fixes stale 0.00 from bulkUpsert bug.
+        $uptimeStale    = $previousUptime === null || (float) $previousUptime === 0.0 || $rowAge >= $uptimeTtl;
+
+        if ($uptimeStale) {
+            $uptime = $this->fetchUptime($val);
+        } else {
+            $uptime = (float) $previousUptime;
+        }
+
+        $status       = $this->parseStatus($val['status'] ?? '');
+        $jailed_count = $this->fetchJailedCount($val);
+
+        return [
+            'operator_address'         => $valoper,
+            'chain_id'                 => (int) $this->chain->id,
+            'moniker'                  => $val['description']['moniker'] ?? null,
+            'status'                   => $status,
+            'commission_rate'          => $commission_rate,
+            'total_stake'              => $total_stake,
+            'self_stake'               => $self_stake,
+            'delegator_count'          => $delegator_count,
+            'uptime_30d'               => $uptime,
+
+            'jailed_count'             => $jailed_count,
+            'voting_power_rank'        => $voting_power_rank,
+        ];
+    }
+
+    /**
+     * Look up a validator in the cached bonded set.
+     * Returns the raw LCD array or null if not found.
+     */
+    private function findInBondedCache(string $valoper): ?array
+    {
+        $vals = $this->getBondedValidators();
+
+        foreach ($vals as $v) {
+            if (($v['operator_address'] ?? '') === $valoper) {
+                return $v;
+            }
+        }
+
+        return null;
     }
 
     // ── Bulk Validator Fetching ────────────────────────────────────────────
@@ -104,21 +247,12 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
      */
     public function fetch_all_validators(): array
     {
-        $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
-            'status'           => 'BOND_STATUS_BONDED',
-            'pagination.limit' => 500,
-        ]);
+        // Reuse the cached bonded set (also populates cache for enrichment).
+        $vals = $this->getBondedValidators();
 
-        if (!$response || empty($response['validators'])) {
+        if (empty($vals)) {
             return [];
         }
-
-        $vals = $response['validators'];
-
-        // Sort by tokens descending to derive rank.
-        usort($vals, function ($a, $b) {
-            return bccomp($b['tokens'] ?? '0', $a['tokens'] ?? '0');
-        });
 
         $results = [];
         foreach ($vals as $rank => $val) {
@@ -136,7 +270,7 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
                 'self_stake'               => null,  // Expensive per-validator call — populated on refresh
                 'delegator_count'          => null,  // Same — populated on refresh
                 'uptime_30d'               => null,  // Same — populated on refresh
-                'governance_participation' => null,  // Same — populated on refresh
+
                 'jailed_count'             => ($val['jailed'] ?? false) ? 1 : 0,
                 'voting_power_rank'        => $rank + 1,
             ];
@@ -161,26 +295,46 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
 
     private function lcdGet(string $path, array $params = []): ?array
     {
+        $chainId = (int) ($this->chain->id ?? 0);
+
+        // Check per-chain budget BEFORE making the call. If this chain has
+        // already used its allocation, skip the API call entirely and return
+        // null (same as a failed request — callers already handle null).
+        if (class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')
+            && $chainId > 0
+            && \BCC\Onchain\Services\EnrichmentScheduler::isChainBudgetExceeded($chainId)
+        ) {
+            return null;
+        }
+
         $url = $this->rest_url . $path;
 
         if (!empty($params)) {
             $url .= '?' . http_build_query($params);
         }
 
-        $response = wp_remote_get($url, [
+        $response = ApiRetry::get($url, [
             'timeout' => $this->timeout,
             'headers' => ['Accept' => 'application/json'],
+        ], [
+            'label'    => 'Cosmos LCD ' . $path,
+            'chain_id' => $chainId,
         ]);
 
         if (is_wp_error($response)) {
-            error_log("BCC Cosmos Fetcher: LCD error for {$path} — " . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[Cosmos Fetcher] LCD error for ' . $path . ': ' . $response->get_error_message());
             return null;
         }
 
         $code = wp_remote_retrieve_response_code($response);
         if ($code !== 200) {
-            error_log("BCC Cosmos Fetcher: LCD {$code} for {$path}");
+            \BCC\Core\Log\Logger::error('[Cosmos Fetcher] LCD ' . $code . ' for ' . $path);
             return null;
+        }
+
+        // Track API call AFTER successful response (not before).
+        if (class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')) {
+            \BCC\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
         }
 
         $body = wp_remote_retrieve_body($response);
@@ -191,7 +345,7 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
 
     private function tokensToDisplay(string $amount): float
     {
-        return round((float) $amount / 1e6, 6);
+        return round((float) $amount / pow(10, $this->decimals), 6);
     }
 
     private function ensureValoperPrefix(string $address): string
@@ -200,6 +354,26 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
             return $address;
         }
 
+        // Use bech32_prefix from chain config (DB-driven, no code change needed
+        // to add new Cosmos chains). Falls back to hardcoded map for chains
+        // where the config hasn't been populated yet.
+        $bech32Prefix = $this->chain->bech32_prefix ?? null;
+
+        // Validate: bech32 HRPs are strictly lowercase alpha. A bad DB value
+        // here would produce broken addresses that silently fail LCD lookups.
+        if ($bech32Prefix && !preg_match('/^[a-z]+$/', $bech32Prefix)) {
+            $bech32Prefix = null; // fall through to hardcoded map
+        }
+
+        if ($bech32Prefix) {
+            $pos = strpos($address, '1');
+            if ($pos !== false) {
+                $existingPrefix = substr($address, 0, $pos);
+                return str_replace($existingPrefix . '1', $bech32Prefix . 'valoper1', $address);
+            }
+        }
+
+        // Fallback: hardcoded map for backward compatibility.
         $prefix = '';
         $pos = strpos($address, '1');
         if ($pos !== false) {
@@ -212,6 +386,10 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
             'akash'  => 'akashvaloper',
             'juno'   => 'junovaloper',
             'stars'  => 'starsvaloper',
+            'inj'    => 'injvaloper',
+            'cro'    => 'crocnclvaloper',
+            'jkl'    => 'jklvaloper',
+            'kujira' => 'kujiravaloper',
         ];
 
         if (isset($valoper_map[$prefix])) {
@@ -389,7 +567,13 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
 
     private function fetchSelfDelegation(string $valoper): ?float
     {
-        $self_addr = str_replace('valoper', '', $valoper);
+        // Derive the account address by decoding the valoper bech32 to raw bytes
+        // and re-encoding with the account HRP. str_replace('valoper','') produces
+        // an invalid checksum — bech32 checksums cover the HRP.
+        $self_addr = $this->valoperToAccountAddress($valoper);
+        if (!$self_addr) {
+            return null;
+        }
 
         $delegation = $this->lcdGet("/cosmos/staking/v1beta1/validators/{$valoper}/delegations/{$self_addr}");
 
@@ -400,57 +584,106 @@ class CosmosFetcher implements FetcherInterface, CollectionFetcherInterface
         return null;
     }
 
-    private function fetchGovernanceParticipation(string $valoper): ?float
+    /**
+     * Convert a valoper address to its account address.
+     * e.g. cosmosvaloper1abc... → cosmos1xyz... (same raw bytes, different HRP + checksum)
+     */
+    public function valoperToAccountAddress(string $valoper): ?string
     {
-        $proposals = $this->lcdGet('/cosmos/gov/v1beta1/proposals', [
-            'pagination.limit'   => 20,
-            'pagination.reverse' => 'true',
+        $pos = strpos($valoper, 'valoper1');
+        if ($pos === false) {
+            return null;
+        }
+
+        $accountHrp = substr($valoper, 0, $pos); // "cosmos", "osmo", "akash", etc.
+        $rawBytes   = $this->bech32Decode($valoper);
+        if ($rawBytes === null) {
+            return null;
+        }
+
+        return $this->bech32Encode($accountHrp, $rawBytes);
+    }
+
+    /**
+     * Decode a bech32 address to raw address bytes (20 bytes for standard Cosmos addresses).
+     */
+    private function bech32Decode(string $bech32): ?string
+    {
+        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+        // Split at last '1'
+        $lastOne = strrpos($bech32, '1');
+        if ($lastOne === false || $lastOne < 1) {
+            return null;
+        }
+
+        $dataPart = substr($bech32, $lastOne + 1);
+        if (strlen($dataPart) < 6) {
+            return null; // need at least 6 chars for checksum
+        }
+
+        // Decode data characters to 5-bit values
+        $values = [];
+        for ($i = 0; $i < strlen($dataPart); $i++) {
+            $pos = strpos($charset, $dataPart[$i]);
+            if ($pos === false) {
+                return null;
+            }
+            $values[] = $pos;
+        }
+
+        // Strip the 6-character checksum
+        $fiveBitData = array_slice($values, 0, -6);
+
+        // Convert from 5-bit groups back to 8-bit bytes
+        $bytes = $this->convertBits($fiveBitData, 5, 8, false);
+        if ($bytes === null) {
+            return null;
+        }
+
+        // Pack back into a binary string
+        $raw = '';
+        foreach ($bytes as $b) {
+            $raw .= chr($b);
+        }
+
+        return $raw;
+    }
+
+    /**
+     * Get the bonded validator set for this chain, sorted by tokens desc.
+     * Cached per chain ID — fetched once per PHP process.
+     */
+    private function getBondedValidators(): array
+    {
+        $chainId = (int) $this->chain->id;
+
+        if (isset(self::$validatorListCache[$chainId])) {
+            return self::$validatorListCache[$chainId];
+        }
+
+        $response = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
+            'status'           => 'BOND_STATUS_BONDED',
+            'pagination.limit' => 500,
         ]);
 
-        if (!$proposals || empty($proposals['proposals'])) {
-            return null;
+        if (!$response || empty($response['validators'])) {
+            self::$validatorListCache[$chainId] = [];
+            return [];
         }
 
-        $total = 0;
-        $voted = 0;
-        $voter = str_replace('valoper', '', $valoper);
+        $vals = $response['validators'];
+        usort($vals, function ($a, $b) {
+            return bccomp($b['tokens'] ?? '0', $a['tokens'] ?? '0');
+        });
 
-        foreach ($proposals['proposals'] as $prop) {
-            $status = $prop['status'] ?? '';
-            if (!in_array($status, ['PROPOSAL_STATUS_PASSED', 'PROPOSAL_STATUS_REJECTED'], true)) {
-                continue;
-            }
-
-            $total++;
-
-            $vote = $this->lcdGet("/cosmos/gov/v1beta1/proposals/{$prop['proposal_id']}/votes/{$voter}");
-            if ($vote && isset($vote['vote'])) {
-                $voted++;
-            }
-        }
-
-        if ($total === 0) {
-            return null;
-        }
-
-        return round(($voted / $total) * 100, 2);
+        self::$validatorListCache[$chainId] = $vals;
+        return $vals;
     }
 
     private function fetchVotingPowerRank(string $valoper): ?int
     {
-        $validators = $this->lcdGet('/cosmos/staking/v1beta1/validators', [
-            'status'           => 'BOND_STATUS_BONDED',
-            'pagination.limit' => 300,
-        ]);
-
-        if (!$validators || empty($validators['validators'])) {
-            return null;
-        }
-
-        $vals = $validators['validators'];
-        usort($vals, function ($a, $b) {
-            return bccomp($b['tokens'] ?? '0', $a['tokens'] ?? '0');
-        });
+        $vals = $this->getBondedValidators();
 
         foreach ($vals as $i => $v) {
             if (($v['operator_address'] ?? '') === $valoper) {
