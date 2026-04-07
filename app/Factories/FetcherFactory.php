@@ -10,6 +10,9 @@ use BCC\Onchain\Contracts\FetcherInterface;
 use BCC\Onchain\Fetchers\EvmFetcher;
 use BCC\Onchain\Fetchers\CosmosFetcher;
 use BCC\Onchain\Fetchers\SolanaFetcher;
+use BCC\Onchain\Fetchers\ThorchainFetcher;
+use BCC\Onchain\Fetchers\PolkadotFetcher;
+use BCC\Onchain\Fetchers\NearFetcher;
 use BCC\Onchain\Repositories\ChainRepository;
 
 /**
@@ -25,9 +28,12 @@ class FetcherFactory
      * @var array<string, string>
      */
     private static array $drivers = [
-        'evm'    => EvmFetcher::class,
-        'cosmos' => CosmosFetcher::class,
-        'solana' => SolanaFetcher::class,
+        'evm'        => EvmFetcher::class,
+        'cosmos'     => CosmosFetcher::class,
+        'solana'     => SolanaFetcher::class,
+        'thorchain'  => ThorchainFetcher::class,
+        'polkadot'   => PolkadotFetcher::class,
+        'near'       => NearFetcher::class,
     ];
 
     /**
@@ -63,6 +69,14 @@ class FetcherFactory
             throw new \InvalidArgumentException("No fetcher driver for chain type: {$type}");
         }
 
+        // Validate external URLs to prevent SSRF against internal hosts.
+        foreach (['rpc_url', 'rest_url', 'explorer_url'] as $urlField) {
+            $url = $chain->$urlField ?? '';
+            if ($url !== '' && !self::isExternalUrl($url)) {
+                throw new \InvalidArgumentException("Blocked internal/invalid URL in {$urlField} for chain: {$chain->slug}");
+            }
+        }
+
         $class = self::$drivers[$type];
 
         if (!class_exists($class)) {
@@ -70,6 +84,25 @@ class FetcherFactory
         }
 
         return new $class($chain);
+    }
+
+    /**
+     * Validate that a URL points to an external host (not localhost/private IPs).
+     */
+    private static function isExternalUrl(string $url): bool
+    {
+        $parsed = parse_url($url);
+        if (!$parsed || !in_array($parsed['scheme'] ?? '', ['http', 'https'], true)) {
+            return false;
+        }
+        $host = $parsed['host'] ?? '';
+        if (in_array($host, ['localhost', '127.0.0.1', '::1', '0.0.0.0'], true)) {
+            return false;
+        }
+        if (preg_match('/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|127\.)/', $host)) {
+            return false;
+        }
+        return true;
     }
 
     /**

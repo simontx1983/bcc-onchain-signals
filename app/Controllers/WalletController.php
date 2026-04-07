@@ -2,6 +2,7 @@
 
 namespace BCC\Onchain\Controllers;
 
+use BCC\Core\Wallet\WalletIdentityService;
 use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Repositories\WalletRepository;
 use BCC\Onchain\Services\CollectionService;
@@ -23,9 +24,6 @@ if (!defined('ABSPATH')) {
  */
 class WalletController
 {
-    const CHALLENGE_PREFIX = "Sign this message to verify your wallet on Blue Collar Crypto. Nonce: ";
-    const CHALLENGE_TTL = 300;
-
     /**
      * Boot hooks.
      */
@@ -55,6 +53,14 @@ class WalletController
             wp_send_json_error(['message' => 'Not logged in.'], 401);
         }
 
+        // Rate limit: 10 requests per minute per user.
+        $rate_key = 'bcc_wallet_rl_' . $user_id;
+        $hits = (int) get_transient($rate_key);
+        if ($hits >= 10) {
+            wp_send_json_error(['message' => 'Too many requests. Please wait.'], 429);
+        }
+        set_transient($rate_key, $hits + 1, 60);
+
         $chain_slug     = sanitize_text_field($_POST['chain_slug'] ?? '');
         $wallet_address = sanitize_text_field($_POST['wallet_address'] ?? '');
 
@@ -67,22 +73,16 @@ class WalletController
             wp_send_json_error(['message' => 'Unsupported chain.'], 400);
         }
 
-        $nonce   = wp_generate_password(32, false);
-        $message = self::CHALLENGE_PREFIX . $nonce;
-
-        $challenge_data = [
-            'nonce'          => $nonce,
-            'message'        => $message,
-            'chain_slug'     => $chain_slug,
-            'chain_id'       => $chain_id,
-            'wallet_address' => $wallet_address,
-            'expires_at'     => time() + self::CHALLENGE_TTL,
-        ];
-        update_user_meta($user_id, self::challengeKey($user_id, $wallet_address), $challenge_data);
+        $challenge = WalletIdentityService::generateChallenge(
+            $user_id,
+            $chain_slug,
+            $chain_id,
+            $wallet_address
+        );
 
         wp_send_json_success([
-            'message' => $message,
-            'nonce'   => $nonce,
+            'message' => $challenge['message'],
+            'nonce'   => $challenge['nonce'],
         ]);
     }
 
@@ -109,16 +109,11 @@ class WalletController
             wp_send_json_error(['message' => 'Missing address or signature.'], 400);
         }
 
-        $meta_key  = self::challengeKey($user_id, $wallet_address);
-        $challenge = get_user_meta($user_id, $meta_key, true);
+        // Consume the stored challenge (one-time use).
+        $challenge = WalletIdentityService::consumeChallenge($user_id, $wallet_address);
 
-        if (!$challenge || !is_array($challenge)) {
-            wp_send_json_error(['message' => 'Challenge not found. Please try again.'], 400);
-        }
-
-        if (time() > ($challenge['expires_at'] ?? 0)) {
-            delete_user_meta($user_id, $meta_key);
-            wp_send_json_error(['message' => 'Challenge expired. Please try again.'], 400);
+        if (!$challenge) {
+            wp_send_json_error(['message' => 'Challenge not found or expired. Please try again.'], 400);
         }
 
         $chain = ChainRepository::getById((int) $challenge['chain_id']);
@@ -126,73 +121,32 @@ class WalletController
             wp_send_json_error(['message' => 'Chain not found.'], 400);
         }
 
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            error_log('BCC Wallet Connect: Verifying chain_type=' . $chain->chain_type
-                . ' address=' . $wallet_address
-                . ' sig_length=' . strlen($signature)
-                . ' sig_starts=' . substr($signature, 0, 50));
-        }
-
-        $valid = \BCC\Core\Crypto\WalletVerifier::verify(
-            $chain->chain_type,
-            $challenge['message'],
-            $signature,
-            $wallet_address
-        );
-
-        if (!$valid) {
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log('BCC Wallet Connect: Verification FAILED for chain_type=' . $chain->chain_type);
-            }
-            wp_send_json_error(['message' => 'Signature verification failed.'], 403);
-        }
-
-        delete_user_meta($user_id, $meta_key);
-
-        // Atomic insert-or-find: uses INSERT ... ON DUPLICATE KEY UPDATE
-        // against the UNIQUE KEY (user_id, chain_id, wallet_address).
-        // Eliminates the TOCTOU race between exists() check and insert().
-        $result = WalletRepository::insertOrFind([
-            'user_id'        => $user_id,
-            'post_id'        => $post_id,
-            'wallet_address' => $wallet_address,
-            'chain_id'       => (int) $chain->id,
-            'wallet_type'    => $wallet_type,
-            'label'          => $label,
-        ]);
-
-        $wallet_link_id = $result['id'];
-
-        if (!$wallet_link_id) {
-            if (class_exists('BCC\\Core\\Log\\Logger')) {
-                \BCC\Core\Log\Logger::error('[bcc-onchain-signals] wallet_insert_failed', [
-                    'user_id'  => $user_id,
-                    'chain_id' => (int) $chain->id,
-                ]);
-            }
-            wp_send_json_error(['message' => 'Failed to save wallet.'], 500);
-        }
-
-        if (!$result['inserted']) {
-            // Wallet already existed — concurrent request or re-verification.
-            // Return 409 so the frontend knows it's a duplicate.
+        // Pre-check: reject re-verification attempts with 409.
+        if (WalletRepository::exists($user_id, (int) $chain->id, $wallet_address)) {
             wp_send_json_error(['message' => 'This wallet is already linked to your account.'], 409);
         }
 
-        WalletRepository::verify($wallet_link_id);
+        // Single execution pipeline: verify signature + link wallet + fire event.
+        $result = WalletIdentityService::verifyAndLink(
+            $user_id,
+            $chain->slug,
+            $chain->chain_type,
+            (int) $chain->id,
+            $wallet_address,
+            $signature,
+            $challenge['message'],
+            [],       // extra (Cosmos params not used in AJAX flow)
+            $post_id,
+            $wallet_type,
+            $label
+        );
 
-        $user_wallets  = WalletRepository::getForUser($user_id);
-        $chain_wallets = array_filter($user_wallets, function ($w) use ($chain) {
-            return (int) $w->chain_id === (int) $chain->id;
-        });
-        if (count($chain_wallets) <= 1) {
-            WalletRepository::setPrimary($wallet_link_id, $user_id);
+        if (!$result['success']) {
+            wp_send_json_error(['message' => $result['message']], 403);
         }
 
-        do_action('bcc_wallet_verified', $user_id, $chain->slug, $wallet_address);
-
         wp_send_json_success([
-            'wallet_link_id' => $wallet_link_id,
+            'wallet_link_id' => $result['wallet_link_id'],
             'chain'          => $chain->slug,
             'chain_name'     => $chain->name,
             'address'        => $wallet_address,
@@ -214,10 +168,21 @@ class WalletController
             wp_send_json_error(['message' => 'Invalid request.'], 400);
         }
 
-        $deleted = WalletRepository::delete($wallet_link_id, $user_id);
+        // Resolve chain + address BEFORE deleting so we can notify listeners.
+        $wallet = WalletRepository::getById($wallet_link_id);
+        if (!$wallet || (int) $wallet->user_id !== $user_id) {
+            wp_send_json_error(['message' => 'Wallet not found or not yours.'], 404);
+        }
+
+        // Single execution pipeline: delete + fire event.
+        $deleted = WalletIdentityService::unlinkWallet(
+            $user_id,
+            $wallet->chain_slug,
+            $wallet->wallet_address
+        );
 
         if (!$deleted) {
-            wp_send_json_error(['message' => 'Wallet not found or not yours.'], 404);
+            wp_send_json_error(['message' => 'Failed to disconnect wallet.'], 500);
         }
 
         wp_send_json_success(['deleted' => $wallet_link_id]);
@@ -398,12 +363,20 @@ class WalletController
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
         $user_id     = get_current_user_id();
-        $entity_type = sanitize_key($_POST['entity_type'] ?? '');
-        $entity_id   = (int) ($_POST['entity_id'] ?? 0);
-
         if (!$user_id) {
             wp_send_json_error(['message' => 'Authentication required.'], 401);
         }
+
+        // Rate limit: 10 requests per minute per user.
+        $rate_key = 'bcc_claim_rl_' . $user_id;
+        $hits = (int) get_transient($rate_key);
+        if ($hits >= 10) {
+            wp_send_json_error(['message' => 'Too many requests. Please wait.'], 429);
+        }
+        set_transient($rate_key, $hits + 1, 60);
+
+        $entity_type = sanitize_key($_POST['entity_type'] ?? '');
+        $entity_id   = (int) ($_POST['entity_id'] ?? 0);
 
         if (!$entity_type || !$entity_id) {
             wp_send_json_error(['message' => 'Missing entity type or ID.'], 400);
@@ -466,11 +439,6 @@ class WalletController
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
-
-    private static function challengeKey(int $user_id, string $address): string
-    {
-        return 'bcc_wallet_challenge_' . $user_id . '_' . md5(strtolower($address));
-    }
 
     private static function getChainsForJs(): array
     {
