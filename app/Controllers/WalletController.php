@@ -3,8 +3,10 @@
 namespace BCC\Onchain\Controllers;
 
 use BCC\Core\Wallet\WalletIdentityService;
+use BCC\Core\Wallet\WalletVerificationRequest;
 use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Repositories\WalletRepository;
+use BCC\Core\Log\Logger;
 use BCC\Onchain\Services\CollectionService;
 
 if (!defined('ABSPATH')) {
@@ -92,6 +94,10 @@ class WalletController
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
+        if (!\BCC\Core\Security\Throttle::allow('wallet_verify', 5, 60)) {
+            wp_send_json_error(['message' => 'Too many requests.'], 429);
+        }
+
         $user_id = get_current_user_id();
         if (!$user_id) {
             wp_send_json_error(['message' => 'Not logged in.'], 401);
@@ -128,22 +134,25 @@ class WalletController
 
         // Single execution pipeline: verify signature + link wallet + fire event.
         $result = WalletIdentityService::verifyAndLink(
-            $user_id,
-            $chain->slug,
-            $chain->chain_type,
-            (int) $chain->id,
-            $wallet_address,
-            $signature,
-            $challenge['message'],
-            [],       // extra (Cosmos params not used in AJAX flow)
-            $post_id,
-            $wallet_type,
-            $label
+            WalletVerificationRequest::fromArray([
+                'userId'           => $user_id,
+                'chainSlug'        => $chain->slug,
+                'chainType'        => $chain->chain_type,
+                'chainId'          => (int) $chain->id,
+                'walletAddress'    => $wallet_address,
+                'signature'        => $signature,
+                'challengeMessage' => $challenge['message'],
+                'postId'           => $post_id,
+                'walletType'       => $wallet_type,
+                'label'            => $label,
+            ])
         );
 
         if (!$result['success']) {
             wp_send_json_error(['message' => $result['message']], 403);
         }
+
+        Logger::audit('wallet_connected', ['user_id' => $user_id, 'chain' => $chain->slug, 'address' => $wallet_address]);
 
         wp_send_json_success([
             'wallet_link_id' => $result['wallet_link_id'],
@@ -160,6 +169,10 @@ class WalletController
     public static function ajax_disconnect(): void
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        if (!\BCC\Core\Security\Throttle::allow('wallet_disconnect', 5, 60)) {
+            wp_send_json_error(['message' => 'Too many requests.'], 429);
+        }
 
         $user_id        = get_current_user_id();
         $wallet_link_id = (int) ($_POST['wallet_link_id'] ?? 0);
@@ -185,6 +198,8 @@ class WalletController
             wp_send_json_error(['message' => 'Failed to disconnect wallet.'], 500);
         }
 
+        Logger::audit('wallet_disconnected', ['user_id' => get_current_user_id(), 'wallet_id' => $wallet_link_id]);
+
         wp_send_json_success(['deleted' => $wallet_link_id]);
     }
 
@@ -193,6 +208,10 @@ class WalletController
     public static function ajax_set_primary(): void
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        if (!\BCC\Core\Security\Throttle::allow('wallet_primary', 10, 60)) {
+            wp_send_json_error(['message' => 'Too many requests.'], 429);
+        }
 
         $user_id        = get_current_user_id();
         $wallet_link_id = (int) ($_POST['wallet_link_id'] ?? 0);
@@ -215,6 +234,10 @@ class WalletController
     public static function ajax_list(): void
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        if (!\BCC\Core\Security\Throttle::allow('wallet_list', 20, 60)) {
+            wp_send_json_error(['message' => 'Too many requests.'], 429);
+        }
 
         $user_id = get_current_user_id();
         if (!$user_id) {
@@ -249,13 +272,17 @@ class WalletController
         register_rest_route('bcc/v1', '/wallets', [
             'methods'             => \WP_REST_Server::READABLE,
             'callback'            => [__CLASS__, 'rest_list_wallets'],
-            'permission_callback' => function () { return is_user_logged_in(); },
+            'permission_callback' => function () {
+                return is_user_logged_in() && \BCC\Core\Permissions\Permissions::is_not_suspended();
+            },
         ]);
 
         register_rest_route('bcc/v1', '/wallets/project/(?P<post_id>\d+)', [
             'methods'             => \WP_REST_Server::READABLE,
             'callback'            => [__CLASS__, 'rest_project_wallets'],
-            'permission_callback' => function () { return is_user_logged_in(); },
+            'permission_callback' => function () {
+                return is_user_logged_in() && \BCC\Core\Permissions\Permissions::is_not_suspended();
+            },
         ]);
 
         register_rest_route('bcc/v1', '/chains', [
@@ -335,6 +362,10 @@ class WalletController
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
+        if (!\BCC\Core\Security\Throttle::allow('collection_toggle', 10, 60)) {
+            wp_send_json_error(['message' => 'Too many requests.'], 429);
+        }
+
         $user_id       = get_current_user_id();
         $collection_id = (int) ($_POST['collection_id'] ?? 0);
         $show          = filter_var($_POST['show'] ?? true, FILTER_VALIDATE_BOOLEAN);
@@ -385,6 +416,7 @@ class WalletController
         $result = \BCC\Onchain\Services\ClaimService::claim($user_id, $entity_type, $entity_id);
 
         if ($result['success']) {
+            Logger::audit('entity_claimed', ['user_id' => $user_id, 'type' => $entity_type, 'id' => $entity_id]);
             wp_send_json_success($result);
         } else {
             $code = !empty($result['needs_wallet']) ? 412 : 400;
@@ -398,6 +430,10 @@ class WalletController
     public static function ajax_claim_status(): void
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
+
+        if (!\BCC\Core\Security\Throttle::allow('claim_status', 20, 60)) {
+            wp_send_json_error(['message' => 'Too many requests.'], 429);
+        }
 
         $entity_type = sanitize_key($_GET['entity_type'] ?? $_POST['entity_type'] ?? '');
         $entity_id   = (int) ($_GET['entity_id'] ?? $_POST['entity_id'] ?? 0);

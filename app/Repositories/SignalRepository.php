@@ -87,7 +87,7 @@ class SignalRepository
         ));
 
         if ($result === false) {
-            error_log('[BCC Onchain] Upsert failed for ' . $data['wallet_address'] . ' on ' . $data['chain'] . ': ' . $wpdb->last_error);
+            \BCC\Core\Log\Logger::error('[Onchain] Upsert failed for ' . $data['wallet_address'] . ' on ' . $data['chain'] . ': ' . $wpdb->last_error);
         } else {
             self::invalidateUser((int) $data['user_id']);
         }

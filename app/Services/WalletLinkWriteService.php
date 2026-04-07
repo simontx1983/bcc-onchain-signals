@@ -23,7 +23,8 @@ final class WalletLinkWriteService implements WalletLinkWriteInterface
         string $chainSlug,
         string $walletAddress,
         int $postId = 0,
-        string $walletType = 'user'
+        string $walletType = 'user',
+        string $label = ''
     ): int {
         // Resolve chain slug → chain_id
         $chain = ChainRepository::getBySlug($chainSlug);
@@ -33,30 +34,26 @@ final class WalletLinkWriteService implements WalletLinkWriteInterface
 
         $chainId = (int) $chain->id;
 
-        // If wallet already exists, return existing ID
-        if (WalletRepository::exists($userId, $chainId, $walletAddress)) {
-            global $wpdb;
-            $table = WalletRepository::table();
-            $existingId = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT id FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s LIMIT 1",
-                $userId,
-                $chainId,
-                $walletAddress
-            ));
-            return $existingId;
-        }
-
-        // Insert new wallet link
-        $walletLinkId = WalletRepository::insert([
+        // Atomic insert-or-find: uses INSERT ... ON DUPLICATE KEY UPDATE
+        // against the UNIQUE KEY (user_id, chain_id, wallet_address).
+        // Eliminates the TOCTOU race between exists() check and insert().
+        $result = WalletRepository::insertOrFind([
             'user_id'        => $userId,
             'post_id'        => $postId,
             'wallet_address' => $walletAddress,
             'chain_id'       => $chainId,
             'wallet_type'    => $walletType,
+            'label'          => $label,
         ]);
 
-        if ($walletLinkId) {
-            // Mark as verified immediately (trust-engine already verified the sig)
+        $walletLinkId = $result['id'];
+
+        if (!$walletLinkId) {
+            return 0;
+        }
+
+        if ($result['inserted']) {
+            // Mark as verified immediately (caller already verified the sig)
             WalletRepository::verify($walletLinkId);
 
             // Auto-set primary if first wallet on this chain for this user

@@ -40,6 +40,8 @@ function bcc_onchain_create_chains_table(): void {
         rest_url VARCHAR(500) DEFAULT NULL,
         explorer_url VARCHAR(500) DEFAULT NULL,
         native_token VARCHAR(20) DEFAULT NULL,
+        decimals TINYINT UNSIGNED NOT NULL DEFAULT 6,
+        bech32_prefix VARCHAR(20) DEFAULT NULL,
         icon_url VARCHAR(500) DEFAULT NULL,
         is_testnet TINYINT(1) NOT NULL DEFAULT 0,
         is_active TINYINT(1) NOT NULL DEFAULT 1,
@@ -120,51 +122,129 @@ function bcc_onchain_create_chains_table(): void {
             'native_token' => 'BNB',
         ],
 
-        // Cosmos chains
+        // Cosmos chains (decimals + bech32_prefix for multi-chain support)
         [
-            'slug'         => 'cosmos',
-            'name'         => 'Cosmos Hub',
-            'chain_type'   => 'cosmos',
-            'rest_url'     => 'https://rest.cosmos.directory/cosmoshub',
-            'rpc_url'      => 'https://rpc.cosmos.directory/cosmoshub',
-            'explorer_url' => 'https://www.mintscan.io/cosmos',
-            'native_token' => 'ATOM',
+            'slug'           => 'cosmos',
+            'name'           => 'Cosmos Hub',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/cosmoshub',
+            'rpc_url'        => 'https://rpc.cosmos.directory/cosmoshub',
+            'explorer_url'   => 'https://www.mintscan.io/cosmos',
+            'native_token'   => 'ATOM',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'cosmos',
         ],
         [
-            'slug'         => 'osmosis',
-            'name'         => 'Osmosis',
-            'chain_type'   => 'cosmos',
-            'rest_url'     => 'https://rest.cosmos.directory/osmosis',
-            'rpc_url'      => 'https://rpc.cosmos.directory/osmosis',
-            'explorer_url' => 'https://www.mintscan.io/osmosis',
-            'native_token' => 'OSMO',
+            'slug'           => 'osmosis',
+            'name'           => 'Osmosis',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/osmosis',
+            'rpc_url'        => 'https://rpc.cosmos.directory/osmosis',
+            'explorer_url'   => 'https://www.mintscan.io/osmosis',
+            'native_token'   => 'OSMO',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'osmo',
         ],
         [
-            'slug'         => 'akash',
-            'name'         => 'Akash',
-            'chain_type'   => 'cosmos',
-            'rest_url'     => 'https://rest.cosmos.directory/akash',
-            'rpc_url'      => 'https://rpc.cosmos.directory/akash',
-            'explorer_url' => 'https://www.mintscan.io/akash',
-            'native_token' => 'AKT',
+            'slug'           => 'akash',
+            'name'           => 'Akash',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/akash',
+            'rpc_url'        => 'https://rpc.cosmos.directory/akash',
+            'explorer_url'   => 'https://www.mintscan.io/akash',
+            'native_token'   => 'AKT',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'akash',
         ],
         [
-            'slug'         => 'juno',
-            'name'         => 'Juno',
-            'chain_type'   => 'cosmos',
-            'rest_url'     => 'https://rest.cosmos.directory/juno',
-            'rpc_url'      => 'https://rpc.cosmos.directory/juno',
-            'explorer_url' => 'https://www.mintscan.io/juno',
-            'native_token' => 'JUNO',
+            'slug'           => 'juno',
+            'name'           => 'Juno',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/juno',
+            'rpc_url'        => 'https://rpc.cosmos.directory/juno',
+            'explorer_url'   => 'https://www.mintscan.io/juno',
+            'native_token'   => 'JUNO',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'juno',
         ],
         [
-            'slug'         => 'stargaze',
-            'name'         => 'Stargaze',
-            'chain_type'   => 'cosmos',
-            'rest_url'     => 'https://rest.cosmos.directory/stargaze',
-            'rpc_url'      => 'https://rpc.cosmos.directory/stargaze',
-            'explorer_url' => 'https://www.mintscan.io/stargaze',
-            'native_token' => 'STARS',
+            'slug'           => 'stargaze',
+            'name'           => 'Stargaze',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/stargaze',
+            'rpc_url'        => 'https://rpc.cosmos.directory/stargaze',
+            'explorer_url'   => 'https://www.mintscan.io/stargaze',
+            'native_token'   => 'STARS',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'stars',
+        ],
+
+        [
+            'slug'           => 'injective',
+            'name'           => 'Injective',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/injective',
+            'rpc_url'        => 'https://rpc.cosmos.directory/injective',
+            'explorer_url'   => 'https://www.mintscan.io/injective',
+            'native_token'   => 'INJ',
+            'decimals'       => 18,
+            'bech32_prefix'  => 'inj',
+        ],
+        [
+            'slug'           => 'cryptoorgchain',
+            'name'           => 'Cronos POS',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/cryptoorgchain',
+            'rpc_url'        => 'https://rpc.cosmos.directory/cryptoorgchain',
+            'explorer_url'   => 'https://www.mintscan.io/crypto-org',
+            'native_token'   => 'CRO',
+            'decimals'       => 8,
+            'bech32_prefix'  => 'cro',
+        ],
+        [
+            'slug'           => 'jackal',
+            'name'           => 'Jackal',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/jackal',
+            'rpc_url'        => 'https://rpc.cosmos.directory/jackal',
+            'explorer_url'   => 'https://ping.pub/jackal',
+            'native_token'   => 'JKL',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'jkl',
+        ],
+        [
+            'slug'           => 'kujira',
+            'name'           => 'Kujira',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://rest.cosmos.directory/kujira',
+            'rpc_url'        => 'https://rpc.cosmos.directory/kujira',
+            'explorer_url'   => 'https://www.mintscan.io/kujira',
+            'native_token'   => 'KUJI',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'kujira',
+        ],
+
+        // THORChain (custom API — uses ThorchainFetcher, not CosmosFetcher)
+        [
+            'slug'           => 'thorchain',
+            'name'           => 'THORChain',
+            'chain_type'     => 'thorchain',
+            'rest_url'       => 'https://thornode.ninerealms.com',
+            'explorer_url'   => 'https://runescan.io',
+            'native_token'   => 'RUNE',
+            'decimals'       => 8,
+            'bech32_prefix'  => 'thor',
+        ],
+
+        // Polkadot (Subscan API — requires BCC_SUBSCAN_API_KEY in wp-config.php)
+        [
+            'slug'           => 'polkadot',
+            'name'           => 'Polkadot',
+            'chain_type'     => 'polkadot',
+            'rest_url'       => 'https://polkadot.api.subscan.io',
+            'explorer_url'   => 'https://polkadot.subscan.io',
+            'native_token'   => 'DOT',
+            'decimals'       => 10,
         ],
 
         // Solana
@@ -190,8 +270,9 @@ function bcc_onchain_create_chains_table(): void {
 
     foreach ($defaults as $chain) {
         $wpdb->query($wpdb->prepare(
-            "INSERT IGNORE INTO {$table} (slug, name, chain_type, chain_id_hex, rpc_url, rest_url, explorer_url, native_token, created_at)
-             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())",
+            "INSERT IGNORE INTO {$table}
+                (slug, name, chain_type, chain_id_hex, rpc_url, rest_url, explorer_url, native_token, decimals, bech32_prefix, created_at)
+             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %d, %s, NOW())",
             $chain['slug'],
             $chain['name'],
             $chain['chain_type'],
@@ -199,7 +280,30 @@ function bcc_onchain_create_chains_table(): void {
             $chain['rpc_url'] ?? null,
             $chain['rest_url'] ?? null,
             $chain['explorer_url'] ?? null,
-            $chain['native_token'] ?? null
+            $chain['native_token'] ?? null,
+            $chain['decimals'] ?? 6,
+            $chain['bech32_prefix'] ?? null
+        ));
+    }
+
+    // Backfill bech32_prefix for existing Cosmos chains (upgrade path).
+    // INSERT IGNORE above won't update rows that already exist.
+    $prefixes = [
+        'cosmos'         => 'cosmos',
+        'osmosis'        => 'osmo',
+        'akash'          => 'akash',
+        'juno'           => 'juno',
+        'stargaze'       => 'stars',
+        'injective'      => 'inj',
+        'cryptoorgchain' => 'cro',
+        'jackal'         => 'jkl',
+        'kujira'         => 'kujira',
+        'thorchain'      => 'thor',
+    ];
+    foreach ($prefixes as $slug => $prefix) {
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET bech32_prefix = %s WHERE slug = %s AND bech32_prefix IS NULL",
+            $prefix, $slug
         ));
     }
 }

@@ -121,7 +121,113 @@ class SettingsPage
             <h2>Cached Signals</h2>
             <p>Signals are re-fetched from the blockchain APIs every <?php echo BCC_ONCHAIN_CACHE_HOURS; ?> hours for active users. The daily cron runs at the time the plugin was activated.</p>
 
+            <hr>
+
+            <?php self::render_indexer_stats(); ?>
+            <?php self::render_enrichment_stats(); ?>
+
         </div>
         <?php
+    }
+
+    /**
+     * Render the validator indexer metrics panel.
+     */
+    private static function render_indexer_stats(): void
+    {
+        $allStats = get_option('bcc_onchain_indexer_stats', []);
+
+        ?>
+        <h2>Validator Indexer</h2>
+        <?php if (empty($allStats)): ?>
+            <p>No indexer runs recorded yet. The indexer runs every 4 hours.</p>
+        <?php else: ?>
+            <table class="widefat striped" style="max-width:800px">
+                <thead>
+                    <tr>
+                        <th>Chain</th>
+                        <th>Total</th>
+                        <th>New</th>
+                        <th>Updated</th>
+                        <th>Unchanged</th>
+                        <th>Refreshed</th>
+                        <th>Last Run</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($allStats as $slug => $s): ?>
+                    <tr>
+                        <td><strong><?php echo esc_html($s['chain'] ?? $slug); ?></strong></td>
+                        <td><?php echo (int) ($s['total'] ?? 0); ?></td>
+                        <td><?php echo (int) ($s['new'] ?? 0); ?></td>
+                        <td><?php echo (int) ($s['updated'] ?? 0); ?></td>
+                        <td><?php echo (int) ($s['unchanged'] ?? 0); ?></td>
+                        <td><?php echo (int) ($s['refreshed'] ?? 0); ?></td>
+                        <td><?php echo esc_html($s['timestamp'] ?? '—'); ?></td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+            <?php
+            // Totals row
+            $totals = ['total' => 0, 'new' => 0, 'updated' => 0, 'unchanged' => 0];
+            foreach ($allStats as $s) {
+                $totals['total']     += (int) ($s['total'] ?? 0);
+                $totals['new']       += (int) ($s['new'] ?? 0);
+                $totals['updated']   += (int) ($s['updated'] ?? 0);
+                $totals['unchanged'] += (int) ($s['unchanged'] ?? 0);
+            }
+            $writeRate = $totals['total'] > 0
+                ? round((($totals['new'] + $totals['updated']) / $totals['total']) * 100, 1)
+                : 0;
+            ?>
+            <p style="margin-top:8px">
+                <strong>Write rate:</strong> <?php echo $writeRate; ?>% of validators required a DB write.
+                <?php if ($writeRate < 10): ?>
+                    <span style="color:#46b450">&#10003; Lean — most validators unchanged.</span>
+                <?php elseif ($writeRate > 50): ?>
+                    <span style="color:#d63638">&#9888; High churn — investigate if expected.</span>
+                <?php endif; ?>
+            </p>
+        <?php endif;
+    }
+
+    /**
+     * Render the enrichment scheduler metrics panel.
+     */
+    private static function render_enrichment_stats(): void
+    {
+        $stats = get_option('bcc_onchain_enrichment_stats', []);
+
+        ?>
+        <hr>
+        <h2>Enrichment Scheduler</h2>
+        <?php if (empty($stats)): ?>
+            <p>No enrichment runs recorded yet. The scheduler runs every hour.</p>
+        <?php else: ?>
+            <table class="widefat striped" style="max-width:600px">
+                <tbody>
+                    <tr><th>Processed</th><td><?php echo (int) ($stats['processed'] ?? 0); ?></td></tr>
+                    <tr><th>Failed</th><td><?php echo (int) ($stats['failed'] ?? 0); ?></td></tr>
+                    <tr><th>Skipped</th><td><?php echo (int) ($stats['skipped'] ?? 0); ?></td></tr>
+                    <tr><th>API Calls Used</th><td><?php echo (int) ($stats['api_calls'] ?? 0); ?> / 200</td></tr>
+                    <tr><th>Stop Reason</th><td><code><?php echo esc_html($stats['stopped_reason'] ?? '—'); ?></code></td></tr>
+                    <tr><th>Last Run</th><td><?php echo esc_html($stats['timestamp'] ?? '—'); ?></td></tr>
+                </tbody>
+            </table>
+            <?php
+            $failed = (int) ($stats['failed'] ?? 0);
+            $processed = (int) ($stats['processed'] ?? 0);
+            if ($failed > 0 && $processed > 0):
+                $failRate = round(($failed / ($processed + $failed)) * 100, 1);
+                ?>
+                <p style="margin-top:8px">
+                    <strong>Failure rate:</strong> <?php echo $failRate; ?>%
+                    <?php if ($failRate > 20): ?>
+                        <span style="color:#d63638">&#9888; High failure rate — check LCD endpoint health.</span>
+                    <?php endif; ?>
+                </p>
+            <?php endif; ?>
+        <?php endif;
     }
 }

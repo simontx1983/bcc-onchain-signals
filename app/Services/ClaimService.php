@@ -68,18 +68,37 @@ class ClaimService {
             return ['success' => false, 'message' => 'Entity not found.'];
         }
 
+        $entityChainSlug = $entity->chain_slug ?? '';
+
         // Get user's wallets.
         $wallets = WalletRepository::getForUser($userId);
         if (empty($wallets)) {
-            return ['success' => false, 'message' => 'Connect a wallet first to claim this.', 'needs_wallet' => true];
+            return [
+                'success'      => false,
+                'message'      => 'Connect a wallet first to claim this.',
+                'needs_wallet' => true,
+                'chain_slug'   => $entityChainSlug,
+            ];
         }
 
         // Try to match a wallet to the entity.
         $match = self::matchWalletToEntity($wallets, $entity, $entityType);
         if (!$match) {
+            // Check whether the user has ANY wallet on the entity's chain.
+            $entityChainId    = (int) $entity->chain_id;
+            $hasChainWallet   = false;
+            foreach ($wallets as $w) {
+                if ((int) $w->chain_id === $entityChainId) {
+                    $hasChainWallet = true;
+                    break;
+                }
+            }
+
             return [
-                'success' => false,
-                'message' => self::noMatchMessage($entityType, $entity),
+                'success'      => false,
+                'message'      => self::noMatchMessage($entityType, $entity),
+                'needs_wallet' => !$hasChainWallet,
+                'chain_slug'   => $entityChainSlug,
             ];
         }
 
