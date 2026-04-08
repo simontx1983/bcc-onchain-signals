@@ -241,8 +241,9 @@ class SolanaFetcher implements FetcherInterface
                 continue;
             }
 
-            $floorLamports  = $item['floorPrice'] ?? null;
-            $volumeLamports = $item['volumeAll'] ?? null;
+            $floorLamports = $item['floorPrice'] ?? null;
+            // volumeAll is already in SOL (not lamports).
+            $volumeSol     = $item['volumeAll'] ?? null;
 
             $collections[] = [
                 'contract_address'   => $symbol,
@@ -252,8 +253,8 @@ class SolanaFetcher implements FetcherInterface
                 'total_supply'       => isset($item['totalItems']) ? (int) $item['totalItems'] : null,
                 'floor_price'        => $floorLamports !== null ? (float) $floorLamports / 1e9 : null,
                 'floor_currency'     => 'SOL',
-                'unique_holders'     => null,
-                'total_volume'       => $volumeLamports !== null ? (float) $volumeLamports / 1e9 : null,
+                'unique_holders'     => isset($item['ownerCount']) ? (int) $item['ownerCount'] : null,
+                'total_volume'       => $volumeSol !== null ? (float) $volumeSol : null,
                 'listed_percentage'  => isset($item['listedCount'], $item['totalItems']) && $item['totalItems'] > 0
                     ? round((int) $item['listedCount'] / (int) $item['totalItems'] * 100, 2)
                     : null,

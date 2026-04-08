@@ -95,13 +95,29 @@ final class CollectionRepository
         $count     = 0;
 
         foreach ($collections as $data) {
+            // Build the row manually so NULLs stay NULL in the DB
+            // (wpdb::prepare with %d/%f converts null to 0).
+            $supply    = $data['total_supply'] ?? null;
+            $floor     = $data['floor_price'] ?? null;
+            $holders   = $data['unique_holders'] ?? null;
+            $volume    = $data['total_volume'] ?? null;
+            $listed    = $data['listed_percentage'] ?? null;
+            $royalty   = $data['royalty_percentage'] ?? null;
+
+            $sqlSupply  = $supply !== null ? $wpdb->prepare('%d', (int) $supply) : 'NULL';
+            $sqlFloor   = $floor !== null ? $wpdb->prepare('%f', (float) $floor) : 'NULL';
+            $sqlHolders = $holders !== null ? $wpdb->prepare('%d', (int) $holders) : 'NULL';
+            $sqlVolume  = $volume !== null ? $wpdb->prepare('%f', (float) $volume) : 'NULL';
+            $sqlListed  = $listed !== null ? $wpdb->prepare('%f', (float) $listed) : 'NULL';
+            $sqlRoyalty = $royalty !== null ? $wpdb->prepare('%f', (float) $royalty) : 'NULL';
+
             $result = $wpdb->query($wpdb->prepare(
                 "INSERT INTO {$table}
                     (wallet_link_id, contract_address, chain_id, collection_name, token_standard,
                      total_supply, floor_price, floor_currency, unique_holders, total_volume,
                      listed_percentage, royalty_percentage, metadata_storage, image_url,
                      fetched_at, expires_at)
-                 VALUES (NULL, %s, %d, %s, %s, %d, %f, %s, %d, %f, %f, %f, %s, %s, %s, %s)
+                 VALUES (NULL, %s, %d, %s, %s, {$sqlSupply}, {$sqlFloor}, %s, {$sqlHolders}, {$sqlVolume}, {$sqlListed}, {$sqlRoyalty}, %s, %s, %s, %s)
                  ON DUPLICATE KEY UPDATE
                     collection_name    = VALUES(collection_name),
                     token_standard     = VALUES(token_standard),
@@ -118,13 +134,7 @@ final class CollectionRepository
                 (int) $data['chain_id'],
                 $data['collection_name'] ?? null,
                 $data['token_standard'] ?? null,
-                $data['total_supply'] ?? null,
-                $data['floor_price'] ?? null,
                 $data['floor_currency'] ?? null,
-                $data['unique_holders'] ?? null,
-                $data['total_volume'] ?? null,
-                $data['listed_percentage'] ?? null,
-                $data['royalty_percentage'] ?? null,
                 $data['metadata_storage'] ?? null,
                 $data['image_url'] ?? null,
                 $now,
