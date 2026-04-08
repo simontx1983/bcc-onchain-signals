@@ -38,6 +38,15 @@ interface FetcherInterface
     public function fetch_collections(string $walletAddress, int $chainId = 0): array;
 
     /**
+     * Fetch top collections for the chain's global leaderboard.
+     * Not all chains support this — check supports_feature('top_collections') first.
+     *
+     * @param int $limit Max collections to return.
+     * @return array[] Normalized collection rows matching bulkUpsert() shape.
+     */
+    public function fetch_top_collections(int $limit = 100): array;
+
+    /**
      * Get the chain object this fetcher is configured for.
      *
      * @return object Chain row from wp_bcc_chains.

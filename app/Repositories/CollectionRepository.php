@@ -10,6 +10,12 @@ if (!defined('ABSPATH')) {
 
 final class CollectionRepository
 {
+    /** @var string Explicit column list — must match schema-collections.php. */
+    private const COLUMNS = 'id, wallet_link_id, contract_address, chain_id, collection_name,
+                 token_standard, total_supply, floor_price, floor_currency, unique_holders,
+                 total_volume, listed_percentage, royalty_percentage, metadata_storage,
+                 image_url, show_on_profile, fetched_at, expires_at';
+
     public static function table(): string
     {
         return DB::table('onchain_collections');
@@ -161,7 +167,11 @@ final class CollectionRepository
         }
 
         $countSql = "SELECT COUNT(*) FROM {$table} c WHERE {$where}";
-        $mainSql  = "SELECT c.*, ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
+        $mainSql  = "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
+                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
+                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
+                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
+                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
                      FROM {$table} c
                      JOIN {$chains} ch ON ch.id = c.chain_id
                      WHERE {$where}
@@ -178,6 +188,64 @@ final class CollectionRepository
         $items = empty($mainParams)
             ? $wpdb->get_results($mainSql)
             : $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
+
+        return [
+            'items' => $items ?: [],
+            'total' => $total,
+            'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
+        ];
+    }
+
+    /**
+     * Get top collections filtered by chain type (evm, solana, cosmos).
+     * Each chain type is ranked independently — no cross-chain mixing.
+     *
+     * @param string $chainType One of: 'evm', 'solana', 'cosmos'.
+     * @return array{items: array, total: int, pages: int}
+     */
+    public static function getTopCollectionsByChainType(
+        string $chainType,
+        int $page = 1,
+        int $perPage = 20,
+        string $orderBy = 'total_volume'
+    ): array {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        $allowedOrder = ['total_volume', 'floor_price', 'unique_holders', 'total_supply'];
+        if (!in_array($orderBy, $allowedOrder, true)) {
+            $orderBy = 'total_volume';
+        }
+
+        $offset = ($page - 1) * $perPage;
+
+        $countSql = $wpdb->prepare(
+            "SELECT COUNT(*)
+             FROM {$table} c
+             JOIN {$chains} ch ON ch.id = c.chain_id
+             WHERE ch.chain_type = %s",
+            $chainType
+        );
+
+        $mainSql = $wpdb->prepare(
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
+                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
+                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
+                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
+                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
+             FROM {$table} c
+             JOIN {$chains} ch ON ch.id = c.chain_id
+             WHERE ch.chain_type = %s
+             ORDER BY c.{$orderBy} DESC
+             LIMIT %d OFFSET %d",
+            $chainType,
+            $perPage,
+            $offset
+        );
+
+        $total = (int) $wpdb->get_var($countSql);
+        $items = $wpdb->get_results($mainSql);
 
         return [
             'items' => $items ?: [],
@@ -213,7 +281,11 @@ final class CollectionRepository
         ));
 
         $items = $wpdb->get_results($wpdb->prepare(
-            "SELECT c.*, ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
+                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
+                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
+                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
+                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
              FROM {$table} c
              JOIN {$wallets} w ON w.id = c.wallet_link_id
              JOIN {$chains} ch ON ch.id = c.chain_id
@@ -306,14 +378,97 @@ final class CollectionRepository
         );
     }
 
+    /**
+     * Load a collection with chain metadata. Used by ClaimService.
+     */
+    public static function getByIdWithChain(int $collectionId): ?object
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id,
+                    c.collection_name, c.token_standard, c.total_supply,
+                    c.floor_price, c.unique_holders, c.total_volume,
+                    ch.slug AS chain_slug, ch.chain_type
+             FROM {$table} c
+             INNER JOIN {$chains} ch ON ch.id = c.chain_id
+             WHERE c.id = %d",
+            $collectionId
+        ));
+    }
+
+    /**
+     * Resolve post_id for a collection via wallet_link. Used for cache invalidation.
+     */
+    public static function getPostIdForCollection(int $collectionId): int
+    {
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT w.post_id
+             FROM {$table} c
+             JOIN {$wallets} w ON w.id = c.wallet_link_id
+             WHERE c.id = %d LIMIT 1",
+            $collectionId
+        ));
+    }
+
+    /**
+     * Exponential backoff: push expires_at forward by 2x the original TTL.
+     */
+    public static function backoffRow(int $rowId): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+             SET expires_at = DATE_ADD(NOW(), INTERVAL TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2 SECOND)
+             WHERE id = %d",
+            $rowId
+        ));
+
+        return $result !== false;
+    }
+
     public static function getExpired(int $limit = 50): array
     {
         global $wpdb;
         $table = self::table();
 
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$table} WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT %d",
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT %d",
             $limit
         ));
+    }
+
+    /**
+     * Get collection counts grouped by chain_id.
+     * Used by the admin Chains page to show per-chain stats.
+     *
+     * @return array<int, object> Keyed by chain_id, each with ->cnt and ->last_fetched.
+     */
+    public static function getCountsByChain(): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $rows = $wpdb->get_results(
+            "SELECT chain_id, COUNT(*) AS cnt,
+                    MAX(fetched_at) AS last_fetched
+             FROM {$table}
+             GROUP BY chain_id"
+        );
+
+        $map = [];
+        foreach ($rows ?: [] as $row) {
+            $map[(int) $row->chain_id] = $row;
+        }
+
+        return $map;
     }
 }

@@ -9,6 +9,7 @@ return array(
     'BCC\\Onchain\\Admin\\ChainsPage' => $baseDir . '/app/Admin/ChainsPage.php',
     'BCC\\Onchain\\Admin\\SettingsPage' => $baseDir . '/app/Admin/SettingsPage.php',
     'BCC\\Onchain\\Contracts\\FetcherInterface' => $baseDir . '/app/Contracts/FetcherInterface.php',
+    'BCC\\Onchain\\Controllers\\CollectionController' => $baseDir . '/app/Controllers/CollectionController.php',
     'BCC\\Onchain\\Controllers\\SignalController' => $baseDir . '/app/Controllers/SignalController.php',
     'BCC\\Onchain\\Controllers\\WalletController' => $baseDir . '/app/Controllers/WalletController.php',
     'BCC\\Onchain\\Factories\\FetcherFactory' => $baseDir . '/app/Factories/FetcherFactory.php',

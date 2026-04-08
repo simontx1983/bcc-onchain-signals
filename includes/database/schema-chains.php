@@ -224,6 +224,18 @@ function bcc_onchain_create_chains_table(): void {
             'bech32_prefix'  => 'kujira',
         ],
 
+        [
+            'slug'           => 'dungeon',
+            'name'           => 'Dungeon Chain',
+            'chain_type'     => 'cosmos',
+            'rest_url'       => 'https://api.dungeongames.io',
+            'rpc_url'        => 'https://rpc.dungeongames.io',
+            'explorer_url'   => 'https://ping.pub/Dungeonchain',
+            'native_token'   => 'DGN',
+            'decimals'       => 6,
+            'bech32_prefix'  => 'dungeon',
+        ],
+
         // THORChain (custom API — uses ThorchainFetcher, not CosmosFetcher)
         [
             'slug'           => 'thorchain',
@@ -298,6 +310,7 @@ function bcc_onchain_create_chains_table(): void {
         'cryptoorgchain' => 'cro',
         'jackal'         => 'jkl',
         'kujira'         => 'kujira',
+        'dungeon'        => 'dungeon',
         'thorchain'      => 'thor',
     ];
     foreach ($prefixes as $slug => $prefix) {
@@ -305,6 +318,11 @@ function bcc_onchain_create_chains_table(): void {
             "UPDATE {$table} SET bech32_prefix = %s WHERE slug = %s AND bech32_prefix IS NULL",
             $prefix, $slug
         ));
+    }
+
+    // Clear chain cache so newly seeded chains appear immediately.
+    if (class_exists('\\BCC\\Onchain\\Repositories\\ChainRepository')) {
+        \BCC\Onchain\Repositories\ChainRepository::clearCache();
     }
 }
 

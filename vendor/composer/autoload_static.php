@@ -62,6 +62,7 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         'BCC\\Onchain\\Admin\\ChainsPage' => __DIR__ . '/../..' . '/app/Admin/ChainsPage.php',
         'BCC\\Onchain\\Admin\\SettingsPage' => __DIR__ . '/../..' . '/app/Admin/SettingsPage.php',
         'BCC\\Onchain\\Contracts\\FetcherInterface' => __DIR__ . '/../..' . '/app/Contracts/FetcherInterface.php',
+        'BCC\\Onchain\\Controllers\\CollectionController' => __DIR__ . '/../..' . '/app/Controllers/CollectionController.php',
         'BCC\\Onchain\\Controllers\\SignalController' => __DIR__ . '/../..' . '/app/Controllers/SignalController.php',
         'BCC\\Onchain\\Controllers\\WalletController' => __DIR__ . '/../..' . '/app/Controllers/WalletController.php',
         'BCC\\Onchain\\Factories\\FetcherFactory' => __DIR__ . '/../..' . '/app/Factories/FetcherFactory.php',

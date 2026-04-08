@@ -36,7 +36,7 @@ class EvmFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return $feature === 'collection';
+        return in_array($feature, ['collection', 'top_collections'], true);
     }
 
     public function fetch_validator(string $address): array

@@ -210,37 +210,43 @@ class ChainRefreshService
             return;
         }
 
-        $evm_chains = ChainRepository::getActive('evm');
+        // Process all chain types that may support top collections.
+        // Each chain type is indexed independently — no cross-chain mixing.
+        $chain_types = ['evm', 'solana', 'cosmos'];
 
-        foreach ($evm_chains as $chain) {
-            $chainId = (int) $chain->id;
+        foreach ($chain_types as $type) {
+            $chains = ChainRepository::getActive($type);
 
-            if (CircuitBreaker::isOpen($chainId)) {
-                \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
-                continue;
-            }
+            foreach ($chains as $chain) {
+                $chainId = (int) $chain->id;
 
-            try {
-                if (!FetcherFactory::has_driver($chain->chain_type)) {
+                if (CircuitBreaker::isOpen($chainId)) {
+                    \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
                     continue;
                 }
 
-                $fetcher = FetcherFactory::make_for_chain($chain);
+                try {
+                    if (!FetcherFactory::has_driver($chain->chain_type)) {
+                        continue;
+                    }
 
-                if (!method_exists($fetcher, 'fetch_top_collections')) {
-                    continue;
+                    $fetcher = FetcherFactory::make_for_chain($chain);
+
+                    if (!$fetcher->supports_feature('top_collections')) {
+                        continue;
+                    }
+
+                    $collections = $fetcher->fetch_top_collections(100);
+
+                    if (!empty($collections)) {
+                        $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
+                        \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
+                        CircuitBreaker::recordSuccess($chainId);
+                    }
+                } catch (\Exception $e) {
+                    CircuitBreaker::recordFailure($chainId);
+                    \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
-
-                $collections = $fetcher->fetch_top_collections(100);
-
-                if (!empty($collections)) {
-                    $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
-                    \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
-                    CircuitBreaker::recordSuccess($chainId);
-                }
-            } catch (\Exception $e) {
-                CircuitBreaker::recordFailure($chainId);
-                \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
             }
         }
 
@@ -313,12 +319,12 @@ class ChainRefreshService
                 } else {
                     // Empty response after retries — backoff to prevent tight re-fetch
                     // loop on wallets with deleted collections or failing chain APIs.
-                    self::backoffRow(CollectionRepository::table(), (int) $row->id);
+                    CollectionRepository::backoffRow((int) $row->id);
                 }
             } catch (\Exception $e) {
                 CircuitBreaker::recordFailure((int) $row->chain_id);
                 \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
-                self::backoffRow(CollectionRepository::table(), (int) $row->id);
+                CollectionRepository::backoffRow((int) $row->id);
             }
         }
 
@@ -327,28 +333,4 @@ class ChainRefreshService
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    /**
-     * Exponential backoff: push expires_at forward by 2x the original TTL.
-     */
-    private static function backoffRow(string $table, int $row_id): void
-    {
-        global $wpdb;
-
-        $allowed_prefix = $wpdb->prefix . 'bcc_';
-        if (strpos($table, $allowed_prefix) !== 0) {
-            \BCC\Core\Log\Logger::error('[Onchain] Backoff rejected for untrusted table: ' . $table);
-            return;
-        }
-
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-             SET expires_at = DATE_ADD(NOW(), INTERVAL TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2 SECOND)
-             WHERE id = %d",
-            $row_id
-        ));
-
-        if ($result === false) {
-            \BCC\Core\Log\Logger::error('[Onchain] Backoff update failed for ' . $table . ' row ' . $row_id . ': ' . $wpdb->last_error);
-        }
-    }
 }

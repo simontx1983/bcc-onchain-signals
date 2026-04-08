@@ -71,6 +71,7 @@ require_once BCC_ONCHAIN_PATH . 'includes/renderers/onchain-template-functions.p
 // ── Namespace aliases (resolved at call time, not load time) ────────────────
 use BCC\Onchain\Admin\ChainsPage;
 use BCC\Onchain\Admin\SettingsPage;
+use BCC\Onchain\Controllers\CollectionController;
 use BCC\Onchain\Controllers\SignalController;
 use BCC\Onchain\Controllers\WalletController;
 use BCC\Onchain\Repositories\SignalRepository;
@@ -200,6 +201,7 @@ add_action('plugins_loaded', function (): void {
 
     // ── REST API ────────────────────────────────────────────────────────────
     add_action('rest_api_init', [SignalController::class, 'registerRoutes']);
+    add_action('rest_api_init', [CollectionController::class, 'registerRoutes']);
 
     // ── Database migrations ─────────────────────────────────────────────────
     add_action('admin_init', [MigrationService::class, 'maybeUpgrade']);

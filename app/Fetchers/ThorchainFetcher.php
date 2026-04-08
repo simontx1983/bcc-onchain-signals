@@ -100,6 +100,11 @@ class ThorchainFetcher implements FetcherInterface
         return [];
     }
 
+    public function fetch_top_collections(int $limit = 100): array
+    {
+        return [];
+    }
+
     // ── Internal ────────────────────────────────────────────────────
 
     /**

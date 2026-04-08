@@ -40,7 +40,7 @@ class SolanaFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return in_array($feature, ['validator', 'collection'], true);
+        return in_array($feature, ['validator', 'collection', 'top_collections'], true);
     }
 
     // ══════════════════════════════════════════════════════════════════
@@ -187,6 +187,83 @@ class SolanaFetcher implements FetcherInterface
         }
 
         return $result;
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // TOP COLLECTIONS (Magic Eden API v2)
+    // ══════════════════════════════════════════════════════════════════
+
+    /**
+     * Fetch top Solana NFT collections via Magic Eden API v2.
+     * Free endpoint, no API key required.
+     *
+     * @param int $limit Max collections to return (max 100).
+     * @return array[] Normalized collection rows for bulkUpsert().
+     */
+    public function fetch_top_collections(int $limit = 100): array
+    {
+        $chainId = (int) $this->chain->id;
+
+        $url = add_query_arg([
+            'timeRange' => '7d',
+            'limit'     => min($limit, 100),
+        ], 'https://api-mainnet.magiceden.dev/v2/marketplace/popular_collections');
+
+        $response = ApiRetry::get($url, [
+            'timeout' => 20,
+            'headers' => ['Accept' => 'application/json'],
+        ], [
+            'label'    => 'Magic Eden top collections',
+            'chain_id' => $chainId,
+        ]);
+
+        if (is_wp_error($response)) {
+            \BCC\Core\Log\Logger::error('[Solana Fetcher] Magic Eden fetch failed: ' . $response->get_error_message());
+            return [];
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code !== 200) {
+            \BCC\Core\Log\Logger::error('[Solana Fetcher] Magic Eden returned ' . $code);
+            return [];
+        }
+
+        $items = json_decode(wp_remote_retrieve_body($response), true);
+        if (!is_array($items)) {
+            return [];
+        }
+
+        $collections = [];
+
+        foreach ($items as $item) {
+            $symbol = $item['symbol'] ?? '';
+            if (!$symbol) {
+                continue;
+            }
+
+            $floorLamports  = $item['floorPrice'] ?? null;
+            $volumeLamports = $item['volumeAll'] ?? null;
+
+            $collections[] = [
+                'contract_address'   => $symbol,
+                'chain_id'           => $chainId,
+                'collection_name'    => $item['name'] ?? $symbol,
+                'token_standard'     => 'Metaplex',
+                'total_supply'       => isset($item['totalItems']) ? (int) $item['totalItems'] : null,
+                'floor_price'        => $floorLamports !== null ? (float) $floorLamports / 1e9 : null,
+                'floor_currency'     => 'SOL',
+                'unique_holders'     => null,
+                'total_volume'       => $volumeLamports !== null ? (float) $volumeLamports / 1e9 : null,
+                'listed_percentage'  => isset($item['listedCount'], $item['totalItems']) && $item['totalItems'] > 0
+                    ? round((int) $item['listedCount'] / (int) $item['totalItems'] * 100, 2)
+                    : null,
+                'royalty_percentage' => null,
+                'metadata_storage'   => null,
+                'image_url'          => $item['image'] ?? null,
+            ];
+        }
+
+        return $collections;
     }
 
     // ══════════════════════════════════════════════════════════════════

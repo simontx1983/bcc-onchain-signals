@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -47,7 +48,7 @@ class CosmosFetcher implements FetcherInterface
 
     public function supports_feature(string $feature): bool
     {
-        return in_array($feature, ['validator', 'dao'], true);
+        return in_array($feature, ['validator', 'dao', 'top_collections'], true);
     }
 
     // ── Validator Fetching ───────────────────────────────────────────────────
@@ -278,16 +279,125 @@ class CosmosFetcher implements FetcherInterface
         return $results;
     }
 
-    // ── Not Supported ────────────────────────────────────────────────────────
+    // ── NFT Collections (Stargaze Constellations GraphQL) ─────────────────
 
     /**
-     * Cosmos chains lack a standardized NFT collection indexer on LCD.
-     * CW-721 NFTs exist on chains like Stargaze but require chain-specific
-     * indexers (e.g. Constellations API). Returns empty for now.
+     * Per-wallet collection fetch is not supported on Cosmos LCD.
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         return [];
+    }
+
+    /**
+     * Fetch top NFT collections from Stargaze via the Constellations GraphQL API.
+     * Free, no authentication required.
+     *
+     * This is called for any Cosmos-type chain. Stargaze is the primary Cosmos
+     * NFT marketplace — collections from Backbone Labs and other Cosmos projects
+     * appear here if listed on Stargaze.
+     *
+     * @param int $limit Max collections to return.
+     * @return array[] Normalized collection rows for bulkUpsert().
+     */
+    public function fetch_top_collections(int $limit = 100): array
+    {
+        // Resolve the Stargaze chain_id. All Cosmos NFT collections are stored
+        // under the Stargaze chain since that's where the marketplace data lives.
+        $stargaze = ChainRepository::getBySlug('stargaze');
+        $chainId  = $stargaze ? (int) $stargaze->id : (int) $this->chain->id;
+
+        $query = 'query TopCollections($limit: Int, $offset: Int, $sortBy: CollectionSort) {
+            collections(limit: $limit, offset: $offset, sortBy: $sortBy) {
+                collections {
+                    contractAddress
+                    name
+                    floorPriceStars
+                    media { visualAssets { lg { url } } }
+                    tokenCounts { total listed }
+                    stats { volumeTotal numOwners }
+                    royaltyInfo { sharePercent }
+                }
+            }
+        }';
+
+        $variables = [
+            'limit'  => min($limit, 100),
+            'offset' => 0,
+            'sortBy' => 'VOLUME_ALL_TIME_DESC',
+        ];
+
+        $response = ApiRetry::post('https://graphql.mainnet.stargaze-apis.com/graphql', [
+            'timeout' => 20,
+            'headers' => [
+                'Content-Type' => 'application/json',
+                'Accept'       => 'application/json',
+            ],
+            'body' => wp_json_encode([
+                'query'     => $query,
+                'variables' => $variables,
+            ]),
+        ], [
+            'label'    => 'Stargaze top collections',
+            'chain_id' => $chainId,
+        ]);
+
+        if (is_wp_error($response)) {
+            \BCC\Core\Log\Logger::error('[Cosmos Fetcher] Stargaze GraphQL failed: ' . $response->get_error_message());
+            return [];
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code !== 200) {
+            \BCC\Core\Log\Logger::error('[Cosmos Fetcher] Stargaze returned ' . $code);
+            return [];
+        }
+
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        $items = $body['data']['collections']['collections'] ?? [];
+
+        if (empty($items)) {
+            return [];
+        }
+
+        $collections = [];
+
+        foreach ($items as $item) {
+            $addr = $item['contractAddress'] ?? '';
+            if (!$addr) {
+                continue;
+            }
+
+            // floorPriceStars is a decimal string in micro-STARS (already display-ready).
+            $floorStars  = isset($item['floorPriceStars']) ? (float) $item['floorPriceStars'] / 1e6 : null;
+            // volumeTotal is in micro-STARS.
+            $volumeStars = isset($item['stats']['volumeTotal']) ? (float) $item['stats']['volumeTotal'] / 1e6 : null;
+
+            $tokenTotal  = $item['tokenCounts']['total'] ?? null;
+            $tokenListed = $item['tokenCounts']['listed'] ?? null;
+
+            $imageUrl = $item['media']['visualAssets']['lg']['url'] ?? null;
+
+            $collections[] = [
+                'contract_address'   => $addr,
+                'chain_id'           => $chainId,
+                'collection_name'    => $item['name'] ?? null,
+                'token_standard'     => 'CW-721',
+                'total_supply'       => $tokenTotal !== null ? (int) $tokenTotal : null,
+                'floor_price'        => $floorStars,
+                'floor_currency'     => 'STARS',
+                'unique_holders'     => isset($item['stats']['numOwners']) ? (int) $item['stats']['numOwners'] : null,
+                'total_volume'       => $volumeStars,
+                'listed_percentage'  => ($tokenTotal && $tokenListed)
+                    ? round((int) $tokenListed / (int) $tokenTotal * 100, 2)
+                    : null,
+                'royalty_percentage' => $item['royaltyInfo']['sharePercent'] ?? null,
+                'metadata_storage'   => null,
+                'image_url'          => $imageUrl,
+            ];
+        }
+
+        return $collections;
     }
 
     // ── Internal Helpers ─────────────────────────────────────────────────────

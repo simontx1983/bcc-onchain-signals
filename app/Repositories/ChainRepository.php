@@ -10,6 +10,11 @@ if (!defined('ABSPATH')) {
 
 final class ChainRepository
 {
+    /** @var string Explicit column list — must match schema-chains.php. */
+    private const COLUMNS = 'id, slug, name, chain_type, chain_id_hex, rpc_url, rest_url,
+                 explorer_url, native_token, decimals, bech32_prefix, icon_url,
+                 is_testnet, is_active, created_at';
+
     /** @var string Object-cache / transient group. */
     private const CACHE_GROUP = 'bcc_chains';
 
@@ -47,7 +52,7 @@ final class ChainRepository
         $table = self::table();
 
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM {$table} WHERE id = %d LIMIT 1",
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE id = %d LIMIT 1",
             $chainId
         ));
     }
@@ -101,7 +106,7 @@ final class ChainRepository
         $table = self::table();
 
         $rows = $wpdb->get_results(
-            "SELECT * FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC"
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC"
         );
 
         $rows = is_array($rows) ? $rows : [];
@@ -111,6 +116,30 @@ final class ChainRepository
         set_transient('bcc_active_chains', $rows, $ttl);
 
         return $rows;
+    }
+
+    /**
+     * Get ALL chains (including inactive). Admin use only.
+     *
+     * @return object[]
+     */
+    public static function getAll(): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return $wpdb->get_results(
+            "SELECT " . self::COLUMNS . " FROM {$table} ORDER BY chain_type ASC, name ASC"
+        ) ?: [];
+    }
+
+    /**
+     * Clear the chains cache so new/updated chains appear immediately.
+     */
+    public static function clearCache(): void
+    {
+        wp_cache_delete('active_all', self::CACHE_GROUP);
+        delete_transient('bcc_active_chains');
     }
 
     private static function ttl(): int
