@@ -71,23 +71,14 @@ final class BonusService
             return;
         }
 
-        global $wpdb;
-
         $entityTable = ($entityType === 'validator')
             ? ValidatorRepository::table()
             : CollectionRepository::table();
 
-        $walletTable = \BCC\Core\DB\DB::table('wallet_links');
+        $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
 
         // Resolve page_id: entity → wallet_link → post_id.
-        $pageId = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT w.post_id
-             FROM {$entityTable} e
-             JOIN {$walletTable} w ON w.id = e.wallet_link_id
-             WHERE e.id = %d
-             LIMIT 1",
-            $entityId
-        ));
+        $pageId = \BCC\Onchain\Repositories\WalletRepository::getPostIdForEntity($entityTable, $entityId);
 
         // Bulk-indexed entities have wallet_link_id = NULL.
         if (!$pageId) {
@@ -104,37 +95,13 @@ final class BonusService
             'score_contribution'
         ));
 
-        $claimsTable = ClaimRepository::table();
-        $totalClaimBonus = (float) $wpdb->get_var($wpdb->prepare(
-            "SELECT COALESCE(SUM(bonus), 0) FROM (
-                SELECT CASE
-                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
-                    WHEN cl.claim_role = 'holder' THEN 1.0
-                    ELSE 0
-                END AS bonus
-                FROM {$claimsTable} cl
-                JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
-                JOIN {$walletTable} w ON w.id = e.wallet_link_id
-                WHERE w.post_id = %d AND cl.status = 'verified'
-
-                UNION ALL
-
-                SELECT CASE
-                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
-                    WHEN cl.claim_role = 'holder' THEN 1.0
-                    ELSE 0
-                END AS bonus
-                FROM {$claimsTable} cl
-                JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
-                WHERE e.wallet_link_id IS NULL
-                  AND cl.status = 'verified'
-                  AND cl.user_id = %d
-            ) AS combined_bonuses",
+        $totalClaimBonus = ClaimRepository::computePageClaimBonus(
             $entityType,
+            $entityTable,
+            $walletTable,
             $pageId,
-            $entityType,
             $userId
-        ));
+        );
 
         $totalBonus = min($signalBonus + $totalClaimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
 

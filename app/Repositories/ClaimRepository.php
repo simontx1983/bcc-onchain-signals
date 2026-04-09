@@ -15,6 +15,10 @@ if (!defined('ABSPATH')) {
 
 class ClaimRepository {
 
+    /** @var string Explicit column list — must match schema-claims.php. */
+    private const COLUMNS = 'id, user_id, entity_type, entity_id, wallet_address,
+                 chain_id, claim_role, status, verified_at, created_at';
+
     public static function table(): string {
         return bcc_onchain_claims_table();
     }
@@ -70,7 +74,9 @@ class ClaimRepository {
         $table = self::table();
 
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT cl.*, u.display_name AS claimer_name
+            "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address,
+                    cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
+                    u.display_name AS claimer_name
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id = %d
@@ -92,7 +98,9 @@ class ClaimRepository {
         $table = self::table();
 
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT cl.*, u.display_name AS claimer_name
+            "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address,
+                    cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
+                    u.display_name AS claimer_name
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id = %d AND cl.status = 'verified'
@@ -110,7 +118,7 @@ class ClaimRepository {
         $table = self::table();
 
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM {$table}
+            "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE user_id = %d AND entity_type = %s AND entity_id = %d",
             $userId, $entityType, $entityId
         ));
@@ -192,7 +200,9 @@ class ClaimRepository {
         $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
 
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT cl.*, u.display_name AS claimer_name
+            "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address,
+                    cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
+                    u.display_name AS claimer_name
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id IN ({$ph}) AND cl.status = 'verified'
@@ -207,6 +217,62 @@ class ClaimRepository {
         }
 
         return $map;
+    }
+
+    /**
+     * Compute the total claim bonus for a page.
+     *
+     * Sums bonuses from verified claims linked to the page via wallet_link
+     * (wallet-linked entities) and from claims on bulk-indexed entities
+     * belonging to the given user.
+     *
+     * @param string $entityType  'validator' or 'collection'.
+     * @param string $entityTable Fully-qualified entity table name.
+     * @param string $walletTable Fully-qualified wallet_links table name.
+     * @param int    $pageId      Project page ID.
+     * @param int    $userId      User ID (for bulk-indexed entity fallback).
+     * @return float Total bonus.
+     */
+    public static function computePageClaimBonus(
+        string $entityType,
+        string $entityTable,
+        string $walletTable,
+        int $pageId,
+        int $userId
+    ): float {
+        global $wpdb;
+        $table = self::table();
+
+        return (float) $wpdb->get_var($wpdb->prepare(
+            "SELECT COALESCE(SUM(bonus), 0) FROM (
+                SELECT CASE
+                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
+                    WHEN cl.claim_role = 'holder' THEN 1.0
+                    ELSE 0
+                END AS bonus
+                FROM {$table} cl
+                JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
+                JOIN {$walletTable} w ON w.id = e.wallet_link_id
+                WHERE w.post_id = %d AND cl.status = 'verified'
+
+                UNION ALL
+
+                SELECT CASE
+                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
+                    WHEN cl.claim_role = 'holder' THEN 1.0
+                    ELSE 0
+                END AS bonus
+                FROM {$table} cl
+                JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
+                WHERE e.wallet_link_id IS NULL
+                  AND cl.status = 'verified'
+                  AND cl.user_id = %d
+            ) AS combined_bonuses",
+            $entityType,
+            $pageId,
+            $entityType,
+            $userId
+        ));
     }
 
 }

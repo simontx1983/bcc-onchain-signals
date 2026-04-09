@@ -42,38 +42,11 @@ final class WalletLinkReadService implements WalletLinkReadInterface
             return false;
         }
 
-        global $wpdb;
-        $table = WalletRepository::table();
-
-        return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT 1 FROM {$table} WHERE user_id = %d AND chain_id = %d LIMIT 1",
-            $userId,
-            (int) $chainObj->id
-        ));
+        return WalletRepository::hasLinkForChain($userId, (int) $chainObj->id);
     }
 
     public function getUserIdsWithLinks(array $chains, int $limit = 100, int $offset = 0): array
     {
-        if (empty($chains)) {
-            return [];
-        }
-
-        global $wpdb;
-        $table      = WalletRepository::table();
-        $chainTable = ChainRepository::table();
-
-        $slugPlaceholders = implode(',', array_fill(0, count($chains), '%s'));
-        $args = array_merge($chains, [$limit, $offset]);
-
-        $ids = $wpdb->get_col($wpdb->prepare(
-            "SELECT DISTINCT w.user_id
-             FROM {$table} w
-             JOIN {$chainTable} c ON c.id = w.chain_id
-             WHERE c.slug IN ({$slugPlaceholders})
-             LIMIT %d OFFSET %d",
-            ...$args
-        ));
-
-        return array_map('intval', $ids);
+        return WalletRepository::getUserIdsWithChainSlugs($chains, $limit, $offset);
     }
 }

@@ -234,18 +234,7 @@ final class CollectionService
         $result = CollectionRepository::setShowOnProfile($collectionId, $userId, $show);
 
         if ($result) {
-            // Find the project_id to invalidate cache
-            global $wpdb;
-            $table   = CollectionRepository::table();
-            $wallets = \BCC\Onchain\Repositories\WalletRepository::table();
-
-            $postId = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT w.post_id
-                 FROM {$table} c
-                 JOIN {$wallets} w ON w.id = c.wallet_link_id
-                 WHERE c.id = %d LIMIT 1",
-                $collectionId
-            ));
+            $postId = CollectionRepository::getPostIdForCollection($collectionId);
 
             if ($postId) {
                 self::invalidate($postId);

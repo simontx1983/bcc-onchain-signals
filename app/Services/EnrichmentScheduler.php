@@ -187,24 +187,13 @@ final class EnrichmentScheduler
      */
     public static function markDeadValidators(): int
     {
-        global $wpdb;
-        $table = ValidatorRepository::table();
-
-        $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table}
-             SET status = 'inactive',
-                 next_enrichment_at = NULL
-             WHERE enrichment_attempts >= %d
-               AND fetched_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
-               AND status != 'inactive'",
-            self::MAX_ATTEMPTS
-        ));
+        $result = ValidatorRepository::markDeadValidators(self::MAX_ATTEMPTS);
 
         if ($result > 0) {
             self::log(sprintf('Marked %d dead validators as inactive.', $result));
         }
 
-        return (int) $result;
+        return $result;
     }
 
     // =====================================================================
@@ -229,27 +218,7 @@ final class EnrichmentScheduler
      */
     private static function fetchBatch(): array
     {
-        global $wpdb;
-        $table = ValidatorRepository::table();
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT * FROM {$table}
-             WHERE (next_enrichment_at IS NULL OR next_enrichment_at <= NOW())
-               AND (retry_after IS NULL OR retry_after <= NOW())
-               AND enrichment_attempts < %d
-             ORDER BY
-                CASE
-                    WHEN wallet_link_id IS NOT NULL AND self_stake IS NULL THEN 0
-                    WHEN wallet_link_id IS NOT NULL THEN 1
-                    WHEN self_stake IS NULL THEN 2
-                    ELSE 3
-                END ASC,
-                total_stake DESC,
-                last_enriched_at ASC
-             LIMIT %d",
-            self::MAX_ATTEMPTS,
-            self::MAX_VALIDATORS_PER_RUN
-        ));
+        return ValidatorRepository::fetchEnrichmentBatch(self::MAX_ATTEMPTS, self::MAX_VALIDATORS_PER_RUN);
     }
 
     // =====================================================================
@@ -311,9 +280,6 @@ final class EnrichmentScheduler
      */
     private static function markSuccess(object $row, int $apiCalls): void
     {
-        global $wpdb;
-        $table = ValidatorRepository::table();
-
         $isLinked = ($row->wallet_link_id ?? null) !== null;
         $baseTtl  = $isLinked ? self::REFRESH_LINKED : self::REFRESH_DEFAULT;
 
@@ -322,18 +288,8 @@ final class EnrichmentScheduler
         $multiplier = 1.0 + ($jitter - 0.5) * 2 * self::JITTER_RATIO;
         $ttlSeconds = (int) ($baseTtl * $multiplier);
 
-        $wpdb->update(
-            $table,
-            [
-                'last_enriched_at'    => current_time('mysql', true),
-                'next_enrichment_at'  => gmdate('Y-m-d H:i:s', time() + $ttlSeconds),
-                'retry_after'         => null,
-                'enrichment_attempts' => 0,
-            ],
-            ['id' => (int) $row->id],
-            ['%s', '%s', '%s', '%d'],
-            ['%d']
-        );
+        $nextEnrichmentAt = gmdate('Y-m-d H:i:s', time() + $ttlSeconds);
+        ValidatorRepository::markEnrichmentSuccess((int) $row->id, $nextEnrichmentAt);
 
         self::log(sprintf(
             'OK id=%d %s — %d API calls, next in %s',
@@ -359,23 +315,11 @@ final class EnrichmentScheduler
      */
     private static function markFailure(object $row, string $error): void
     {
-        global $wpdb;
-        $table = ValidatorRepository::table();
-
         $attempts     = ((int) ($row->enrichment_attempts ?? 0)) + 1;
         $backoffSec   = (int) min(self::BACKOFF_MAX, self::BACKOFF_BASE * pow(4, $attempts - 1));
         $retryAfter   = gmdate('Y-m-d H:i:s', time() + $backoffSec);
 
-        $wpdb->update(
-            $table,
-            [
-                'enrichment_attempts' => $attempts,
-                'retry_after'         => $retryAfter,
-            ],
-            ['id' => (int) $row->id],
-            ['%d', '%s'],
-            ['%d']
-        );
+        ValidatorRepository::markEnrichmentFailure((int) $row->id, $attempts, $retryAfter);
 
         self::log(sprintf(
             'FAIL id=%d %s — attempt %d, retry in %s. Error: %s',

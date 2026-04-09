@@ -10,6 +10,12 @@ if (!defined('ABSPATH')) {
 
 final class ValidatorRepository
 {
+    /** @var string Explicit column list — must match schema-validators.php. */
+    private const COLUMNS = 'id, wallet_link_id, operator_address, chain_id, moniker, status,
+                 commission_rate, total_stake, self_stake, delegator_count, uptime_30d,
+                 jailed_count, voting_power_rank, fetched_at, expires_at,
+                 last_enriched_at, next_enrichment_at, retry_after, enrichment_attempts';
+
     public static function table(): string
     {
         return DB::table('onchain_validators');
@@ -314,7 +320,11 @@ final class ValidatorRepository
         ));
 
         $items = $wpdb->get_results($wpdb->prepare(
-            "SELECT v.*, c.slug AS chain_slug, c.name AS chain_name, c.explorer_url, c.native_token
+            "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
+                    v.status, v.commission_rate, v.total_stake, v.self_stake,
+                    v.delegator_count, v.uptime_30d, v.jailed_count,
+                    v.voting_power_rank, v.fetched_at, v.expires_at,
+                    c.slug AS chain_slug, c.name AS chain_name, c.explorer_url, c.native_token
              FROM {$table} v
              JOIN {$wallets} w ON w.id = v.wallet_link_id
              JOIN {$chains} c ON c.id = v.chain_id
@@ -379,7 +389,11 @@ final class ValidatorRepository
         }
 
         $countSql = "SELECT COUNT(*) FROM {$table} v WHERE {$where}";
-        $mainSql  = "SELECT v.*, c.slug AS chain_slug, c.name AS chain_name, c.explorer_url, c.native_token
+        $mainSql  = "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
+                            v.status, v.commission_rate, v.total_stake, v.self_stake,
+                            v.delegator_count, v.uptime_30d, v.jailed_count,
+                            v.voting_power_rank, v.fetched_at, v.expires_at,
+                            c.slug AS chain_slug, c.name AS chain_name, c.explorer_url, c.native_token
                      FROM {$table} v
                      JOIN {$chains} c ON c.id = v.chain_id
                      WHERE {$where}
@@ -402,6 +416,239 @@ final class ValidatorRepository
             'total' => $total,
             'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
         ];
+    }
+
+    // ── Aggregate stats (OnchainDataReadService) ────────────────────────────
+
+    /**
+     * Aggregate validator stats for a project page.
+     *
+     * @return object|null  Object with chains_count, active_count, total_stake, total_delegators.
+     */
+    public static function getAggregateStatsForProject(int $postId): ?object
+    {
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT
+                COUNT(*)                                          AS chains_count,
+                SUM(CASE WHEN v.status = 'active' THEN 1 ELSE 0 END) AS active_count,
+                COALESCE(SUM(v.total_stake), 0)                   AS total_stake,
+                COALESCE(SUM(v.delegator_count), 0)               AS total_delegators
+             FROM {$table} v
+             JOIN {$wallets} w ON w.id = v.wallet_link_id
+             WHERE w.post_id = %d",
+            $postId
+        ));
+    }
+
+    /**
+     * Top validator by total_stake for a project page.
+     */
+    public static function getTopValidatorForProject(int $postId): ?object
+    {
+        global $wpdb;
+        $table   = self::table();
+        $wallets = WalletRepository::table();
+        $chains  = ChainRepository::table();
+
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT v.id, v.operator_address, v.chain_id, v.moniker, v.status,
+                    v.commission_rate, v.total_stake, v.self_stake, v.delegator_count,
+                    v.uptime_30d, v.jailed_count, v.voting_power_rank, v.fetched_at,
+                    c.slug AS chain_slug, c.name AS chain_name
+             FROM {$table} v
+             JOIN {$wallets} w ON w.id = v.wallet_link_id
+             JOIN {$chains} c ON c.id = v.chain_id
+             WHERE w.post_id = %d
+             ORDER BY v.total_stake DESC
+             LIMIT 1",
+            $postId
+        ));
+    }
+
+    /**
+     * Load a validator with chain metadata. Used by ClaimService.
+     */
+    public static function getByIdWithChain(int $validatorId): ?object
+    {
+        global $wpdb;
+        $table  = self::table();
+        $chains = ChainRepository::table();
+
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
+                    v.status, v.commission_rate, v.total_stake, v.self_stake,
+                    v.delegator_count, v.uptime_30d, v.jailed_count, v.voting_power_rank,
+                    c.slug AS chain_slug, c.chain_type
+             FROM {$table} v
+             INNER JOIN {$chains} c ON c.id = v.chain_id
+             WHERE v.id = %d",
+            $validatorId
+        ));
+    }
+
+    // ── Enrichment scheduler methods ────────────────────────────────────────
+
+    /**
+     * Mark validators as inactive if not seen by indexer in 30+ days.
+     *
+     * @return int Number of rows updated.
+     */
+    public static function markDeadValidators(int $maxAttempts): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+             SET status = 'inactive',
+                 next_enrichment_at = NULL
+             WHERE enrichment_attempts >= %d
+               AND fetched_at < DATE_SUB(NOW(), INTERVAL 30 DAY)
+               AND status != 'inactive'",
+            $maxAttempts
+        ));
+
+        return (int) $result;
+    }
+
+    /**
+     * Fetch the next batch of validators due for enrichment.
+     *
+     * @return object[]
+     */
+    public static function fetchEnrichmentBatch(int $maxAttempts, int $limit): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table}
+             WHERE (next_enrichment_at IS NULL OR next_enrichment_at <= NOW())
+               AND (retry_after IS NULL OR retry_after <= NOW())
+               AND enrichment_attempts < %d
+             ORDER BY
+                CASE
+                    WHEN wallet_link_id IS NOT NULL AND self_stake IS NULL THEN 0
+                    WHEN wallet_link_id IS NOT NULL THEN 1
+                    WHEN self_stake IS NULL THEN 2
+                    ELSE 3
+                END ASC,
+                total_stake DESC,
+                last_enriched_at ASC
+             LIMIT %d",
+            $maxAttempts,
+            $limit
+        )) ?: [];
+    }
+
+    /**
+     * Mark a validator as successfully enriched with next schedule.
+     */
+    public static function markEnrichmentSuccess(int $validatorId, string $nextEnrichmentAt): void
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->update(
+            $table,
+            [
+                'last_enriched_at'    => current_time('mysql', true),
+                'next_enrichment_at'  => $nextEnrichmentAt,
+                'retry_after'         => null,
+                'enrichment_attempts' => 0,
+            ],
+            ['id' => $validatorId],
+            ['%s', '%s', '%s', '%d'],
+            ['%d']
+        );
+    }
+
+    /**
+     * Mark a validator enrichment as failed with backoff.
+     */
+    public static function markEnrichmentFailure(int $validatorId, int $attempts, string $retryAfter): void
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->update(
+            $table,
+            [
+                'enrichment_attempts' => $attempts,
+                'retry_after'         => $retryAfter,
+            ],
+            ['id' => $validatorId],
+            ['%d', '%s'],
+            ['%d']
+        );
+    }
+
+    // ── Admin queries (ChainsPage) ──────────────────────────────────────────
+
+    /**
+     * Get active validators for a chain. Admin enrichment use.
+     *
+     * @return object[]
+     */
+    public static function getActiveForChain(int $chainId, int $limit = 500): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT " . self::COLUMNS . " FROM {$table}
+             WHERE chain_id = %d AND status != 'inactive'
+             ORDER BY total_stake DESC
+             LIMIT %d",
+            $chainId, $limit
+        )) ?: [];
+    }
+
+    /**
+     * Get validator counts grouped by chain_id. Admin page summary.
+     *
+     * @return array<int, object>  Keyed by chain_id. Each has cnt, last_fetched.
+     */
+    public static function getCountsByChain(): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $rows = $wpdb->get_results(
+            "SELECT chain_id, COUNT(*) AS cnt,
+                    MAX(fetched_at) AS last_fetched
+             FROM {$table}
+             GROUP BY chain_id"
+        );
+
+        $map = [];
+        foreach ($rows ?: [] as $row) {
+            $map[(int) $row->chain_id] = $row;
+        }
+
+        return $map;
+    }
+
+    /**
+     * Exponential backoff: push expires_at forward by 2x the original TTL.
+     */
+    public static function backoffRow(int $rowId): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+             SET expires_at = DATE_ADD(NOW(), INTERVAL TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2 SECOND)
+             WHERE id = %d",
+            $rowId
+        ));
+
+        return $result !== false;
     }
 
 }

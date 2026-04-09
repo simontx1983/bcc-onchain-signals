@@ -145,31 +145,15 @@ class ClaimService {
     }
 
     /**
-     * Load entity data by type and ID.
+     * Load entity data by type and ID. Delegates to repository.
      */
     private static function loadEntity(string $entityType, int $entityId): ?object {
-        global $wpdb;
-
         if ($entityType === 'validator') {
-            $table = bcc_onchain_validators_table();
-            return $wpdb->get_row($wpdb->prepare(
-                "SELECT v.*, c.slug AS chain_slug, c.chain_type
-                 FROM {$table} v
-                 INNER JOIN " . \BCC\Core\DB\DB::table('chains') . " c ON c.id = v.chain_id
-                 WHERE v.id = %d",
-                $entityId
-            ));
+            return ValidatorRepository::getByIdWithChain($entityId);
         }
 
         if ($entityType === 'collection') {
-            $table = bcc_onchain_collections_table();
-            return $wpdb->get_row($wpdb->prepare(
-                "SELECT col.*, c.slug AS chain_slug, c.chain_type
-                 FROM {$table} col
-                 INNER JOIN " . \BCC\Core\DB\DB::table('chains') . " c ON c.id = col.chain_id
-                 WHERE col.id = %d",
-                $entityId
-            ));
+            return CollectionRepository::getByIdWithChain($entityId);
         }
 
         return null;

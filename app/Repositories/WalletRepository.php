@@ -10,6 +10,10 @@ if (!defined('ABSPATH')) {
 
 final class WalletRepository
 {
+    /** @var string Explicit column list — must match schema-wallets.php. */
+    private const COLUMNS = 'id, user_id, post_id, wallet_address, chain_id, wallet_type,
+                 label, verified_at, is_primary, created_at';
+
     public static function table(): string
     {
         return DB::table('wallet_links');
@@ -136,7 +140,9 @@ final class WalletRepository
         $whereSql = implode(' AND ', $where);
 
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT w.*, c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
+            "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
+                    w.label, w.verified_at, w.is_primary, w.created_at,
+                    c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
              FROM {$table} w
              JOIN {$chains} c ON c.id = w.chain_id
              WHERE {$whereSql}
@@ -162,7 +168,9 @@ final class WalletRepository
         $whereSql = implode(' AND ', $where);
 
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT w.*, c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
+            "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
+                    w.label, w.verified_at, w.is_primary, w.created_at,
+                    c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
              FROM {$table} w
              JOIN {$chains} c ON c.id = w.chain_id
              WHERE {$whereSql}
@@ -178,11 +186,94 @@ final class WalletRepository
         $chains = ChainRepository::table();
 
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT w.*, c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
+            "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
+                    w.label, w.verified_at, w.is_primary, w.created_at,
+                    c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
              FROM {$table} w
              JOIN {$chains} c ON c.id = w.chain_id
              WHERE w.id = %d",
             $walletLinkId
+        ));
+    }
+
+    /**
+     * Find wallet link ID by user, chain, and address. Used by unlink flows.
+     */
+    public static function findIdByUserChainAddress(int $userId, int $chainId, string $walletAddress): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s LIMIT 1",
+            $userId, $chainId, $walletAddress
+        ));
+    }
+
+    /**
+     * Check whether a user has at least one wallet on a specific chain.
+     */
+    public static function hasLinkForChain(int $userId, int $chainId): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$table} WHERE user_id = %d AND chain_id = %d LIMIT 1",
+            $userId, $chainId
+        ));
+    }
+
+    /**
+     * Get distinct user IDs that have wallet links on any of the given chain slugs.
+     *
+     * @param string[] $chainSlugs
+     * @return int[]
+     */
+    public static function getUserIdsWithChainSlugs(array $chainSlugs, int $limit = 100, int $offset = 0): array
+    {
+        if (empty($chainSlugs)) {
+            return [];
+        }
+
+        global $wpdb;
+        $table      = self::table();
+        $chainTable = ChainRepository::table();
+
+        $slugPlaceholders = implode(',', array_fill(0, count($chainSlugs), '%s'));
+        $args = array_merge($chainSlugs, [$limit, $offset]);
+
+        $ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT w.user_id
+             FROM {$table} w
+             JOIN {$chainTable} c ON c.id = w.chain_id
+             WHERE c.slug IN ({$slugPlaceholders})
+             LIMIT %d OFFSET %d",
+            ...$args
+        ));
+
+        return array_map('intval', $ids);
+    }
+
+    /**
+     * Resolve post_id from an entity row via wallet_link.
+     * Works for both validators and collections.
+     *
+     * @param string $entityTable  Fully-qualified table name.
+     * @param int    $entityId     Row ID in the entity table.
+     */
+    public static function getPostIdForEntity(string $entityTable, int $entityId): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT w.post_id
+             FROM {$entityTable} e
+             JOIN {$table} w ON w.id = e.wallet_link_id
+             WHERE e.id = %d
+             LIMIT 1",
+            $entityId
         ));
     }
 

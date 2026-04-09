@@ -79,15 +79,11 @@ final class WalletLinkWriteService implements WalletLinkWriteInterface
             return false;
         }
 
-        global $wpdb;
-        $table = WalletRepository::table();
-
-        $walletLinkId = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s LIMIT 1",
+        $walletLinkId = WalletRepository::findIdByUserChainAddress(
             $userId,
             (int) $chain->id,
             $walletAddress
-        ));
+        );
 
         if (!$walletLinkId) {
             return false;

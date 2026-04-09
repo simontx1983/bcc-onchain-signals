@@ -11,6 +11,10 @@ use BCC\Core\PeepSo\PeepSo;
 
 class SignalRepository
 {
+    /** @var string Explicit column list — must match schema (install_own_table). */
+    private const COLUMNS = 'id, user_id, wallet_address, chain, wallet_age_days, first_tx_at,
+                 tx_count, contract_count, score_contribution, raw_data, fetched_at';
+
     /** @var string Object-cache group. */
     private const CACHE_GROUP = 'bcc_onchain_signals';
 
@@ -103,7 +107,7 @@ class SignalRepository
         $max_age = BCC_ONCHAIN_CACHE_HOURS;
 
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM {$table}
+            "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE wallet_address = %s AND chain = %s
                AND fetched_at > DATE_SUB(NOW(), INTERVAL %d HOUR)
              LIMIT 1",
@@ -122,7 +126,7 @@ class SignalRepository
         $table = self::table();
 
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM {$table} WHERE wallet_address = %s AND chain = %s LIMIT 1",
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE wallet_address = %s AND chain = %s LIMIT 1",
             $address, $chain
         ), ARRAY_A);
 
@@ -172,7 +176,7 @@ class SignalRepository
         $table = self::table();
 
         $rows = $wpdb->get_results(
-            $wpdb->prepare("SELECT * FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC", $userId),
+            $wpdb->prepare("SELECT " . self::COLUMNS . " FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC", $userId),
             ARRAY_A
         ) ?: [];
 
