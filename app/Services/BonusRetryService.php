@@ -86,9 +86,20 @@ final class BonusRetryService
      * snapshotted under the lock, processed outside it, then results are
      * written back under a re-acquired lock.
      */
+    private const PROCESS_LOCK_KEY = 'bcc_bonus_retry_process';
+
     public static function processAll(): void
     {
-        // ── Step 1: snapshot pending entries under lock ──────────────────
+        // Exclusive processing lock — prevents concurrent processAll() calls
+        // from applying the same bonuses twice. Separate from LOCK_KEY which
+        // protects the queue option read/write.
+        if (!\BCC\Onchain\Repositories\LockRepository::acquire(self::PROCESS_LOCK_KEY, 0)) {
+            return; // Another processAll() is already running.
+        }
+
+        try {
+
+        // ── Step 1: snapshot pending entries under queue lock ────────────
         if (!\BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
             return;
         }
@@ -179,6 +190,10 @@ final class BonusRetryService
             update_option(self::OPTION_KEY, $current, false);
         } finally {
             \BCC\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+        }
+
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release(self::PROCESS_LOCK_KEY);
         }
     }
 }
