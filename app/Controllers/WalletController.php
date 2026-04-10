@@ -55,13 +55,10 @@ class WalletController
             wp_send_json_error(['message' => 'Not logged in.'], 401);
         }
 
-        // Rate limit: 10 requests per minute per user.
-        $rate_key = 'bcc_wallet_rl_' . $user_id;
-        $hits = (int) get_transient($rate_key);
-        if ($hits >= 10) {
+        // Rate limit: 10 requests per minute per user (atomic).
+        if (!\BCC\Core\Security\Throttle::allow('wallet_challenge', 10, 60)) {
             wp_send_json_error(['message' => 'Too many requests. Please wait.'], 429);
         }
-        set_transient($rate_key, $hits + 1, 60);
 
         $chain_slug     = sanitize_text_field($_POST['chain_slug'] ?? '');
         $wallet_address = sanitize_text_field($_POST['wallet_address'] ?? '');
@@ -130,6 +127,11 @@ class WalletController
         // Pre-check: reject re-verification attempts with 409.
         if (WalletRepository::exists($user_id, (int) $chain->id, $wallet_address)) {
             wp_send_json_error(['message' => 'This wallet is already linked to your account.'], 409);
+        }
+
+        // Pre-check: reject if wallet is already linked to a different user.
+        if (WalletRepository::existsForOtherUser($user_id, (int) $chain->id, $wallet_address)) {
+            wp_send_json_error(['message' => 'This wallet is already linked to another account.'], 409);
         }
 
         // Single execution pipeline: verify signature + link wallet + fire event.
@@ -295,20 +297,72 @@ class WalletController
     public static function rest_list_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
         $wallets = WalletRepository::getForUser(get_current_user_id());
-        return rest_ensure_response($wallets);
+        return rest_ensure_response(array_map([self::class, 'projectWalletFields'], $wallets));
     }
 
     public static function rest_project_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
         $post_id = (int) $req->get_param('post_id');
         $wallets = WalletRepository::getForProject($post_id);
-        return rest_ensure_response($wallets);
+
+        // Ownership check: only the post author or admins see full wallet addresses.
+        $current_user = get_current_user_id();
+        $post         = get_post($post_id);
+        $is_owner     = $post && (int) $post->post_author === $current_user;
+        $is_admin     = current_user_can('manage_options');
+
+        if (!$is_owner && !$is_admin) {
+            // Strip wallet_address for non-owners.
+            return rest_ensure_response(array_map(function (object $w): array {
+                $fields = self::projectWalletFields($w);
+                unset($fields['wallet_address']);
+                return $fields;
+            }, $wallets));
+        }
+
+        return rest_ensure_response(array_map([self::class, 'projectWalletFields'], $wallets));
+    }
+
+    /**
+     * Strip internal IDs (user_id, chain_id, post_id) from wallet REST responses.
+     */
+    private static function projectWalletFields(object $w): array
+    {
+        return [
+            'id'            => (int) $w->id,
+            'wallet_address'=> $w->wallet_address ?? '',
+            'chain_slug'    => $w->chain_slug ?? '',
+            'chain_name'    => $w->chain_name ?? '',
+            'chain_type'    => $w->chain_type ?? '',
+            'explorer_url'  => $w->explorer_url ?? '',
+            'wallet_type'   => $w->wallet_type ?? '',
+            'label'         => $w->label ?? '',
+            'is_primary'    => (bool) ($w->is_primary ?? false),
+            'verified'      => !empty($w->verified_at),
+            'created_at'    => $w->created_at ?? null,
+        ];
     }
 
     public static function rest_list_chains(\WP_REST_Request $req): \WP_REST_Response
     {
+        if (!\BCC\Core\Security\Throttle::allow('list_chains', 30, 60)) {
+            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+        }
+
         $chains = ChainRepository::getActive();
-        return rest_ensure_response($chains);
+        $safe = array_map(function (object $chain): array {
+            return [
+                'id'            => (int) $chain->id,
+                'slug'          => $chain->slug,
+                'name'          => $chain->name,
+                'chain_type'    => $chain->chain_type,
+                'chain_id_hex'  => $chain->chain_id_hex ?? null,
+                'explorer_url'  => $chain->explorer_url ?? null,
+                'native_token'  => $chain->native_token ?? null,
+                'icon_url'      => $chain->icon_url ?? null,
+            ];
+        }, $chains);
+        return rest_ensure_response($safe);
     }
 
     // ── Signature Verification ───────────────────────────────────────────────
@@ -398,13 +452,10 @@ class WalletController
             wp_send_json_error(['message' => 'Authentication required.'], 401);
         }
 
-        // Rate limit: 10 requests per minute per user.
-        $rate_key = 'bcc_claim_rl_' . $user_id;
-        $hits = (int) get_transient($rate_key);
-        if ($hits >= 10) {
+        // Rate limit: 10 requests per minute per user (atomic).
+        if (!\BCC\Core\Security\Throttle::allow('claim_entity', 10, 60)) {
             wp_send_json_error(['message' => 'Too many requests. Please wait.'], 429);
         }
-        set_transient($rate_key, $hits + 1, 60);
 
         $entity_type = sanitize_key($_POST['entity_type'] ?? '');
         $entity_id   = (int) ($_POST['entity_id'] ?? 0);
@@ -431,12 +482,16 @@ class WalletController
     {
         check_ajax_referer('bcc_wallet_nonce', 'nonce');
 
+        if (!is_user_logged_in()) {
+            wp_send_json_error(['message' => 'Authentication required.'], 401);
+        }
+
         if (!\BCC\Core\Security\Throttle::allow('claim_status', 20, 60)) {
             wp_send_json_error(['message' => 'Too many requests.'], 429);
         }
 
-        $entity_type = sanitize_key($_GET['entity_type'] ?? $_POST['entity_type'] ?? '');
-        $entity_id   = (int) ($_GET['entity_id'] ?? $_POST['entity_id'] ?? 0);
+        $entity_type = sanitize_key($_POST['entity_type'] ?? '');
+        $entity_id   = (int) ($_POST['entity_id'] ?? 0);
 
         if (!$entity_type || !$entity_id) {
             wp_send_json_error(['message' => 'Missing parameters.'], 400);
@@ -460,7 +515,6 @@ class WalletController
         wp_send_json_success([
             'claims'     => array_map(function ($c) {
                 return [
-                    'user_id'      => (int) $c->user_id,
                     'claimer_name' => $c->claimer_name ?? '',
                     'role'         => $c->claim_role,
                     'verified_at'  => $c->verified_at,

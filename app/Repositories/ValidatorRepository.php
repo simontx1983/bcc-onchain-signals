@@ -46,18 +46,39 @@ final class ValidatorRepository
             'chain_id'         => (int) $data['chain_id'],
             'moniker'          => isset($data['moniker']) ? sanitize_text_field($data['moniker']) : null,
             'status'           => sanitize_text_field($data['status'] ?? 'unknown'),
-            'commission_rate'  => $data['commission_rate'] ?? null,
-            'total_stake'      => $data['total_stake'] ?? null,
-            'self_stake'       => $data['self_stake'] ?? null,
-            'delegator_count'  => $data['delegator_count'] ?? null,
-            'uptime_30d'       => $data['uptime_30d'] ?? null,
             'jailed_count'     => $data['jailed_count'] ?? 0,
-            'voting_power_rank'=> $data['voting_power_rank'] ?? null,
             'fetched_at'       => current_time('mysql', true),
             'expires_at'       => $expiresAt,
         ];
+        $format = ['%d', '%s', '%d', '%s', '%s', '%d', '%s', '%s'];
 
-        $format = ['%d', '%s', '%d', '%s', '%s', '%f', '%f', '%f', '%d', '%f', '%d', '%d', '%s', '%s'];
+        // Nullable floats: only include when non-null to avoid %f converting NULL to 0.00.
+        // On INSERT, omitted columns get DEFAULT NULL from schema.
+        // On UPDATE, omitted columns keep their existing value.
+        $nullableFloats = [
+            'commission_rate'   => $data['commission_rate'] ?? null,
+            'total_stake'       => $data['total_stake'] ?? null,
+            'self_stake'        => $data['self_stake'] ?? null,
+            'uptime_30d'        => $data['uptime_30d'] ?? null,
+        ];
+        foreach ($nullableFloats as $col => $val) {
+            if ($val !== null) {
+                $row[$col] = (float) $val;
+                $format[]  = '%f';
+            }
+        }
+
+        // Nullable ints — same pattern.
+        $nullableInts = [
+            'delegator_count'   => $data['delegator_count'] ?? null,
+            'voting_power_rank' => $data['voting_power_rank'] ?? null,
+        ];
+        foreach ($nullableInts as $col => $val) {
+            if ($val !== null) {
+                $row[$col] = (int) $val;
+                $format[]  = '%d';
+            }
+        }
 
         if ($existing) {
             $wpdb->update($table, $row, ['id' => (int) $existing], $format, ['%d']);
@@ -202,18 +223,24 @@ final class ValidatorRepository
                 // are omitted — they default to NULL in the schema and are populated
                 // by the EnrichmentScheduler. Using %f with null would store 0.00
                 // instead of NULL, which breaks the "needs enrichment" detection.
+                // Build nullable float fragments to preserve NULL (not 0.00)
+                $sqlCommission = ($data['commission_rate'] ?? null) !== null
+                    ? $wpdb->prepare('%f', (float) $data['commission_rate'])
+                    : 'NULL';
+                $sqlStake = ($data['total_stake'] ?? null) !== null
+                    ? $wpdb->prepare('%f', (float) $data['total_stake'])
+                    : 'NULL';
+
                 $wpdb->query($wpdb->prepare(
                     "INSERT INTO {$table}
                         (wallet_link_id, operator_address, chain_id, moniker, status,
                          commission_rate, total_stake, jailed_count,
                          voting_power_rank, fetched_at, expires_at, next_enrichment_at)
-                     VALUES (NULL, %s, %d, %s, %s, %f, %f, %d, %d, %s, %s, %s)",
+                     VALUES (NULL, %s, %d, %s, %s, {$sqlCommission}, {$sqlStake}, %d, %d, %s, %s, %s)",
                     $addr,
                     $chainId,
                     $data['moniker'] ?? null,
                     $data['status'] ?? 'unknown',
-                    $data['commission_rate'] ?? null,
-                    $data['total_stake'] ?? null,
                     $data['jailed_count'] ?? 0,
                     $data['voting_power_rank'] ?? null,
                     $now,
@@ -249,14 +276,28 @@ final class ValidatorRepository
             }
 
             // ── CHANGED — per-row UPDATE (data columns) ─────────────────
+            // Build nullable float fragments to preserve NULL (not 0.00)
+            $sqlCommission = ($data['commission_rate'] ?? null) !== null
+                ? $wpdb->prepare('%f', (float) $data['commission_rate'])
+                : 'NULL';
+            $sqlStake = ($data['total_stake'] ?? null) !== null
+                ? $wpdb->prepare('%f', (float) $data['total_stake'])
+                : 'NULL';
+
+            // Build nullable voting_power_rank to preserve NULL (not 0)
+            // for validators that left the active set.
+            $sqlVotingRank = ($data['voting_power_rank'] ?? null) !== null
+                ? $wpdb->prepare('%d', (int) $data['voting_power_rank'])
+                : 'NULL';
+
             $wpdb->query($wpdb->prepare(
                 "UPDATE {$table}
                  SET moniker             = %s,
                      status              = %s,
-                     commission_rate     = %f,
-                     total_stake         = %f,
+                     commission_rate     = {$sqlCommission},
+                     total_stake         = {$sqlStake},
                      jailed_count        = %d,
-                     voting_power_rank   = %d,
+                     voting_power_rank   = {$sqlVotingRank},
                      fetched_at          = %s,
                      expires_at          = %s,
                      enrichment_attempts = 0,
@@ -264,10 +305,7 @@ final class ValidatorRepository
                  WHERE id = %d",
                 $data['moniker'] ?? null,
                 $data['status'] ?? 'unknown',
-                $data['commission_rate'] ?? null,
-                $data['total_stake'] ?? null,
                 $data['jailed_count'] ?? 0,
-                $data['voting_power_rank'] ?? null,
                 $now,
                 $expiresAt,
                 (int) $prev->id
@@ -618,6 +656,11 @@ final class ValidatorRepository
         global $wpdb;
         $table = self::table();
 
+        $cached = wp_cache_get('counts_by_chain', 'bcc_onchain_validators');
+        if ($cached !== false) {
+            return $cached;
+        }
+
         $rows = $wpdb->get_results(
             "SELECT chain_id, COUNT(*) AS cnt,
                     MAX(fetched_at) AS last_fetched
@@ -629,6 +672,8 @@ final class ValidatorRepository
         foreach ($rows ?: [] as $row) {
             $map[(int) $row->chain_id] = $row;
         }
+
+        wp_cache_set('counts_by_chain', $map, 'bcc_onchain_validators', HOUR_IN_SECONDS);
 
         return $map;
     }
@@ -649,6 +694,21 @@ final class ValidatorRepository
         ));
 
         return $result !== false;
+    }
+
+    /**
+     * Check whether any validator rows exist for a given wallet_link.
+     * Used by WalletSeedService to skip redundant API calls.
+     */
+    public static function existsForWalletLink(int $walletLinkId): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$table} WHERE wallet_link_id = %d LIMIT 1",
+            $walletLinkId
+        ));
     }
 
 }

@@ -92,10 +92,6 @@ final class CollectionService
             return $items;
         }
 
-        // All collections on this page belong to the page owner's wallets,
-        // so the owner IS the creator for every collection shown here.
-        // The is_creator flag is true for all items on this page.
-
         // Build contract list for holder check
         $contracts = [];
         foreach ($items as $item) {
@@ -117,11 +113,30 @@ final class CollectionService
             }
         }
 
-        foreach ($items as $item) {
-            $addr = strtolower($item->contract_address ?? '');
+        // Batch-load verified claims for the page owner to determine actual creator status.
+        $entityIds = array_filter(array_map(function ($item) {
+            return isset($item->id) ? (int) $item->id : 0;
+        }, $items));
 
-            // Creator: the page owner deployed this collection (it's on their page)
-            $item->is_creator = true;
+        $ownerClaims = [];
+        if (!empty($entityIds)) {
+            $claimsByEntity = \BCC\Onchain\Repositories\ClaimRepository::getForEntityBatch('collection', $entityIds);
+            foreach ($claimsByEntity as $entityId => $claims) {
+                foreach ($claims as $c) {
+                    if ((int) $c->user_id === $ownerId && $c->claim_role === 'creator') {
+                        $ownerClaims[$entityId] = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        foreach ($items as $item) {
+            $addr     = strtolower($item->contract_address ?? '');
+            $entityId = (int) ($item->id ?? 0);
+
+            // Creator: only true if the page owner has a verified "creator" claim.
+            $item->is_creator = isset($ownerClaims[$entityId]);
 
             // Holder: the viewer has a wallet that interacted with this contract
             $item->viewer_holds = ($viewerId && $viewerId !== $ownerId)
@@ -259,9 +274,6 @@ final class CollectionService
         // Bust the first page (most commonly accessed) — both visibility variants.
         wp_cache_delete("project_{$projectId}_1_8_total_volume_h0", self::CACHE_GROUP);
         wp_cache_delete("project_{$projectId}_1_8_total_volume_h1", self::CACHE_GROUP);
-
-        // Legacy key (before show_on_profile filtering was added).
-        wp_cache_delete("project_{$projectId}_1_8_total_volume", self::CACHE_GROUP);
     }
 
     private static function ttl(): int

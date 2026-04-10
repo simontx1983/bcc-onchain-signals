@@ -30,7 +30,6 @@ foreach ($tables as $table) {
 // Clean up options.
 $options = [
     'bcc_onchain_version',
-    'bcc_onchain_db_version',
     'bcc_onchain_pending_bonus',
     'bcc_onchain_indexer_stats',
     'bcc_onchain_enrichment_stats',

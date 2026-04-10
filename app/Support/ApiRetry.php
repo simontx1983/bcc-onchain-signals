@@ -54,6 +54,15 @@ final class ApiRetry
             return new \WP_Error('circuit_breaker_open', "Circuit breaker open for chain {$chainId}");
         }
 
+        // Per-chain budget: check before attempting
+        if ($chainId > 0
+            && class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')
+            && \BCC\Onchain\Services\EnrichmentScheduler::isChainBudgetExceeded($chainId)
+        ) {
+            self::log("BLOCKED by chain budget: {$label} (chain {$chainId})");
+            return new \WP_Error('chain_budget_exceeded', "API budget exceeded for chain {$chainId}");
+        }
+
         $attempt     = 0;
         $lastResponse = null;
 
@@ -68,6 +77,10 @@ final class ApiRetry
                     // Success — record for circuit breaker
                     if ($chainId > 0) {
                         CircuitBreaker::recordSuccess($chainId);
+                    }
+                    // Track API call against enrichment budget (all fetchers).
+                    if ($chainId > 0 && class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')) {
+                        \BCC\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
                     }
                     return $lastResponse;
                 }
@@ -84,15 +97,13 @@ final class ApiRetry
                         CircuitBreaker::recordFailure($chainId);
                     }
 
-                    if ($attempt < $maxRetries) {
-                        sleep($delay);
-                        $attempt++;
-                        continue;
-                    }
+                    // Do NOT sleep — return immediately and let the caller
+                    // (EnrichmentScheduler) decide whether to skip this chain.
+                    // Sleeping in a cron loop can exceed PHP max_execution_time.
                     return $lastResponse;
                 }
 
-                // ── 5xx Server Error — retryable ────────────────────────
+                // ── 5xx Server Error — retryable with short delay ───────
                 if ($code >= 500) {
                     self::log(sprintf(
                         'SERVER ERROR (%d) %s — attempt %d/%d',
@@ -104,7 +115,9 @@ final class ApiRetry
                     }
 
                     if ($attempt < $maxRetries) {
-                        sleep(self::backoffDelay($attempt));
+                        // Cap at 2s to prevent cron timeout; circuit breaker
+                        // handles longer outages at the chain level.
+                        sleep(min(2, self::backoffDelay($attempt)));
                         $attempt++;
                         continue;
                     }
@@ -136,7 +149,7 @@ final class ApiRetry
             }
 
             if ($attempt < $maxRetries) {
-                sleep(self::backoffDelay($attempt));
+                sleep(min(2, self::backoffDelay($attempt)));
                 $attempt++;
                 continue;
             }

@@ -96,12 +96,31 @@ class FetcherFactory
             return false;
         }
         $host = $parsed['host'] ?? '';
-        if (in_array($host, ['localhost', '127.0.0.1', '::1', '0.0.0.0'], true)) {
+        if (!$host) {
             return false;
         }
-        if (preg_match('/^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|127\.)/', $host)) {
+
+        // Resolve hostname to IP to defeat DNS rebinding attacks.
+        $ip = filter_var($host, FILTER_VALIDATE_IP)
+            ? $host
+            : gethostbyname($host);
+
+        // gethostbyname returns the hostname unchanged on failure.
+        if ($ip === $host && !filter_var($host, FILTER_VALIDATE_IP)) {
+            return false; // DNS resolution failed — block.
+        }
+
+        // Block private, reserved, loopback, and link-local IPs.
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
             return false;
         }
+
+        // Block cloud metadata endpoints by hostname.
+        $blocked_hosts = ['metadata.google.internal', 'metadata.google.com'];
+        if (in_array(strtolower($host), $blocked_hosts, true)) {
+            return false;
+        }
+
         return true;
     }
 

@@ -9,28 +9,17 @@ if (!defined('ABSPATH')) {
 /**
  * Converts raw on-chain signal data into a trust score contribution.
  *
- * Score breakdown (max 40 per wallet):
+ * Score breakdown (max 20 per wallet):
  *
- *  Wallet age (max 20 pts)
- *  Transaction depth (max 10 pts)
- *  Contract deployments (max 10 pts)
+ *  Wallet age (max 8 pts)
+ *  Transaction depth (max 7 pts)
+ *  Contract deployments (max 5 pts)
  */
 class SignalScorer
 {
     public static function score(array $signals): float
     {
-        $age_days          = (int)   ($signals['wallet_age_days']    ?? 0);
-        $tx_count          = (int)   ($signals['tx_count']           ?? 0);
-        $contract_count    = (int)   ($signals['contract_count']     ?? 0);
-        $contract_age_days = isset($signals['contract_age_days'])
-                             ? (int) $signals['contract_age_days']
-                             : null;
-
-        $age_score      = self::ageScore($age_days);
-        $depth_score    = self::depthScore($tx_count);
-        $contract_score = self::contractScore($contract_count, $contract_age_days);
-
-        return min(40.0, $age_score + $depth_score + $contract_score);
+        return self::breakdown($signals)['total'];
     }
 
     public static function breakdown(array $signals): array
@@ -54,7 +43,7 @@ class SignalScorer
             'age_score'         => $age_score,
             'depth_score'       => $depth_score,
             'contract_score'    => $contract_score,
-            'total'             => min(40.0, $age_score + $depth_score + $contract_score),
+            'total'             => min((float) BCC_ONCHAIN_MAX_TOTAL_BONUS, $age_score + $depth_score + $contract_score),
             'max_possible'      => BCC_ONCHAIN_MAX_AGE_SCORE + BCC_ONCHAIN_MAX_DEPTH_SCORE + BCC_ONCHAIN_MAX_CONTRACT_SCORE,
         ];
     }
@@ -73,10 +62,14 @@ class SignalScorer
         };
     }
 
+    /**
+     * Depth score tiers — aligned with the API fetch cap of 1000 transactions.
+     * The top tier triggers at 1000 (the max observable count from Etherscan/Solana).
+     */
     private static function depthScore(int $count): float
     {
         return match (true) {
-            $count >= 2000 => 7.0,
+            $count >= 1000 => 7.0,
             $count >= 500  => 5.0,
             $count >= 100  => 3.0,
             $count >= 20   => 1.0,

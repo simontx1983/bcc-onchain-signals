@@ -155,7 +155,6 @@ class CosmosFetcher implements FetcherInterface
         $previousStake = $existingRow ? (float) ($existingRow->total_stake ?? 0) : 0.0;
         $previousSelf  = $existingRow ? ($existingRow->self_stake ?? null) : null;
         // Treat 0 as "never fetched" — no bonded validator has 0 self-delegation.
-        // Bug fix: bulkUpsert previously stored 0.00 instead of NULL for new rows.
         $stakeChanged  = $previousSelf === null
             || (float) $previousSelf === 0.0
             || $total_stake === null
@@ -406,16 +405,6 @@ class CosmosFetcher implements FetcherInterface
     {
         $chainId = (int) ($this->chain->id ?? 0);
 
-        // Check per-chain budget BEFORE making the call. If this chain has
-        // already used its allocation, skip the API call entirely and return
-        // null (same as a failed request — callers already handle null).
-        if (class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')
-            && $chainId > 0
-            && \BCC\Onchain\Services\EnrichmentScheduler::isChainBudgetExceeded($chainId)
-        ) {
-            return null;
-        }
-
         $url = $this->rest_url . $path;
 
         if (!empty($params)) {
@@ -441,10 +430,7 @@ class CosmosFetcher implements FetcherInterface
             return null;
         }
 
-        // Track API call AFTER successful response (not before).
-        if (class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')) {
-            \BCC\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
-        }
+        // API call tracking is handled by ApiRetry::request() for all fetchers.
 
         $body = wp_remote_retrieve_body($response);
         $data = json_decode($body, true);
@@ -480,29 +466,6 @@ class CosmosFetcher implements FetcherInterface
                 $existingPrefix = substr($address, 0, $pos);
                 return str_replace($existingPrefix . '1', $bech32Prefix . 'valoper1', $address);
             }
-        }
-
-        // Fallback: hardcoded map for backward compatibility.
-        $prefix = '';
-        $pos = strpos($address, '1');
-        if ($pos !== false) {
-            $prefix = substr($address, 0, $pos);
-        }
-
-        $valoper_map = [
-            'cosmos' => 'cosmosvaloper',
-            'osmo'   => 'osmovaloper',
-            'akash'  => 'akashvaloper',
-            'juno'   => 'junovaloper',
-            'stars'  => 'starsvaloper',
-            'inj'    => 'injvaloper',
-            'cro'    => 'crocnclvaloper',
-            'jkl'    => 'jklvaloper',
-            'kujira' => 'kujiravaloper',
-        ];
-
-        if (isset($valoper_map[$prefix])) {
-            return str_replace($prefix . '1', $valoper_map[$prefix] . '1', $address);
         }
 
         return $address;

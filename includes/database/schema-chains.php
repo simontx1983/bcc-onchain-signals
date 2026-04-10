@@ -298,28 +298,6 @@ function bcc_onchain_create_chains_table(): void {
         ));
     }
 
-    // Backfill bech32_prefix for existing Cosmos chains (upgrade path).
-    // INSERT IGNORE above won't update rows that already exist.
-    $prefixes = [
-        'cosmos'         => 'cosmos',
-        'osmosis'        => 'osmo',
-        'akash'          => 'akash',
-        'juno'           => 'juno',
-        'stargaze'       => 'stars',
-        'injective'      => 'inj',
-        'cryptoorgchain' => 'cro',
-        'jackal'         => 'jkl',
-        'kujira'         => 'kujira',
-        'dungeon'        => 'dungeon',
-        'thorchain'      => 'thor',
-    ];
-    foreach ($prefixes as $slug => $prefix) {
-        $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET bech32_prefix = %s WHERE slug = %s AND bech32_prefix IS NULL",
-            $prefix, $slug
-        ));
-    }
-
     // Clear chain cache so newly seeded chains appear immediately.
     if (class_exists('\\BCC\\Onchain\\Repositories\\ChainRepository')) {
         \BCC\Onchain\Repositories\ChainRepository::clearCache();

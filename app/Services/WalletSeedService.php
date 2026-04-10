@@ -74,6 +74,9 @@ final class WalletSeedService
 
     /**
      * Seed validator and collection data for a newly verified wallet.
+     *
+     * Idempotent: skips API calls if entities already exist for this wallet_link.
+     * Uses an advisory lock to prevent concurrent cron invocations from double-seeding.
      */
     private static function seedEntities(int $userId, string $chain, string $address): void
     {
@@ -98,23 +101,39 @@ final class WalletSeedService
             return;
         }
 
-        // Seed validator data (Cosmos chains).
-        if ($fetcher->supports_feature('validator')) {
-            $validatorData = $fetcher->fetch_validator($address);
-            if (!empty($validatorData)) {
-                ValidatorRepository::upsert($validatorData, (int) $walletLink->id, HOUR_IN_SECONDS);
-            }
+        $walletLinkId = (int) $walletLink->id;
+
+        // Advisory lock prevents concurrent cron runs from double-seeding the same wallet.
+        $lockKey = 'bcc_seed_entities_' . $walletLinkId;
+        if (!\BCC\Onchain\Repositories\LockRepository::acquire($lockKey, 0)) {
+            return;
         }
 
-        // Seed NFT collection data (all chains).
-        if ($fetcher->supports_feature('collection')) {
-            $collections = $fetcher->fetch_collections($address, (int) $chainObj->id);
-            foreach ($collections as $c) {
-                CollectionRepository::upsert($c, (int) $walletLink->id, 4 * HOUR_IN_SECONDS);
+        try {
+            // Seed validator data (Cosmos chains) — skip if already seeded.
+            if ($fetcher->supports_feature('validator')) {
+                if (!ValidatorRepository::existsForWalletLink($walletLinkId)) {
+                    $validatorData = $fetcher->fetch_validator($address);
+                    if (!empty($validatorData)) {
+                        ValidatorRepository::upsert($validatorData, $walletLinkId, HOUR_IN_SECONDS);
+                    }
+                }
             }
-            if (!empty($collections) && (int) $walletLink->post_id > 0) {
-                CollectionService::invalidate((int) $walletLink->post_id);
+
+            // Seed NFT collection data (all chains) — skip if already seeded.
+            if ($fetcher->supports_feature('collection')) {
+                if (!CollectionRepository::existsForWalletLink($walletLinkId)) {
+                    $collections = $fetcher->fetch_collections($address, (int) $chainObj->id);
+                    foreach ($collections as $c) {
+                        CollectionRepository::upsert($c, $walletLinkId, 4 * HOUR_IN_SECONDS);
+                    }
+                    if (!empty($collections) && (int) $walletLink->post_id > 0) {
+                        CollectionService::invalidate((int) $walletLink->post_id);
+                    }
+                }
             }
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release($lockKey);
         }
     }
 }

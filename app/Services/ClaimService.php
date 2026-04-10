@@ -104,31 +104,35 @@ class ClaimService {
 
         // ── Exclusivity gate: only one operator/creator per entity ────────
         if (in_array($match['role'], self::EXCLUSIVE_ROLES, true)) {
-            $existingPrimary = ClaimRepository::getPrimaryClaim($entityType, $entityId, $match['role']);
+            $result = ClaimRepository::createExclusiveClaim(
+                $userId,
+                $entityType,
+                $entityId,
+                $match['wallet_address'],
+                $match['chain_id'],
+                $match['role']
+            );
 
-            if ($existingPrimary && (int) $existingPrimary->user_id !== $userId) {
-                $roleLabel = ucfirst($match['role']);
-                return [
-                    'success' => false,
-                    'error'   => 'already_claimed',
-                    'message' => "This project already has a verified {$roleLabel}.",
-                ];
+            if (!$result['success']) {
+                return $result;
             }
-        }
 
-        // Record verified claim.
-        $claimId = ClaimRepository::upsert(
-            $userId,
-            $entityType,
-            $entityId,
-            $match['wallet_address'],
-            $match['chain_id'],
-            $match['role'],
-            'verified'
-        );
+            $claimId = $result['claim_id'];
+        } else {
+            // Non-exclusive roles (e.g. holder) — no transaction needed.
+            $claimId = ClaimRepository::upsert(
+                $userId,
+                $entityType,
+                $entityId,
+                $match['wallet_address'],
+                $match['chain_id'],
+                $match['role'],
+                'verified'
+            );
 
-        if (!$claimId) {
-            return ['success' => false, 'message' => 'Failed to save claim.'];
+            if (!$claimId) {
+                return ['success' => false, 'message' => 'Failed to save claim.'];
+            }
         }
 
         $isPrimary = in_array($match['role'], self::EXCLUSIVE_ROLES, true);
@@ -213,11 +217,16 @@ class ClaimService {
             }
 
             // Cosmos: valoper prefix swap. If wallet is cosmos1..., operator is cosmosvaloper1...
-            // The base bytes are the same — just different bech32 prefix.
+            // The underlying 20-byte address is identical — only the bech32 HRP differs.
+            // We must decode both to raw bytes and compare; suffix comparison is invalid
+            // because bech32 checksums differ by HRP.
             if (($entity->chain_type ?? '') === 'cosmos') {
-                $walletBase  = self::bech32StripPrefix($addr);
-                $valoperBase = self::bech32StripPrefix($operatorAddr);
-                if ($walletBase && $walletBase === $valoperBase) {
+                $walletBytes  = self::bech32DecodeToBytes($addr);
+                $valoperBytes = self::bech32DecodeToBytes($operatorAddr);
+                // Both must decode to exactly 20 bytes (standard Cosmos address length).
+                if ($walletBytes !== null && $valoperBytes !== null
+                    && strlen($walletBytes) === 20 && strlen($valoperBytes) === 20
+                    && $walletBytes === $valoperBytes) {
                     return [
                         'wallet_address' => $wallet->wallet_address,
                         'chain_id'       => (int) $wallet->chain_id,
@@ -277,15 +286,65 @@ class ClaimService {
     }
 
     /**
-     * Strip bech32 prefix to get the raw address bytes for comparison.
-     * Returns lowercase hex of the data part, or null on failure.
+     * Decode a bech32 address to its raw address bytes (binary string).
+     * Returns null on invalid input. Pure function — no instance state.
      */
-    private static function bech32StripPrefix(string $address): ?string {
-        $sepPos = strrpos($address, '1');
-        if ($sepPos === false || $sepPos < 1) {
+    private static function bech32DecodeToBytes(string $bech32): ?string {
+        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+        $lastOne = strrpos($bech32, '1');
+        if ($lastOne === false || $lastOne < 1) {
             return null;
         }
-        return substr($address, $sepPos + 1);
+
+        $dataPart = substr($bech32, $lastOne + 1);
+        if (strlen($dataPart) < 6) {
+            return null;
+        }
+
+        $values = [];
+        for ($i = 0; $i < strlen($dataPart); $i++) {
+            $pos = strpos($charset, $dataPart[$i]);
+            if ($pos === false) {
+                return null;
+            }
+            $values[] = $pos;
+        }
+
+        // Strip the 6-character checksum, convert 5-bit → 8-bit.
+        $fiveBitData = array_slice($values, 0, -6);
+        $bytes = self::convertBits($fiveBitData, 5, 8, false);
+        if ($bytes === null) {
+            return null;
+        }
+
+        $raw = '';
+        foreach ($bytes as $b) {
+            $raw .= chr($b);
+        }
+        return $raw;
+    }
+
+    private static function convertBits(array $data, int $fromBits, int $toBits, bool $pad): ?array {
+        $acc    = 0;
+        $bits   = 0;
+        $result = [];
+        $maxv   = (1 << $toBits) - 1;
+
+        foreach ($data as $value) {
+            $acc = ($acc << $fromBits) | $value;
+            $bits += $fromBits;
+            while ($bits >= $toBits) {
+                $bits -= $toBits;
+                $result[] = ($acc >> $bits) & $maxv;
+            }
+        }
+
+        if ($pad && $bits > 0) {
+            $result[] = ($acc << ($toBits - $bits)) & $maxv;
+        }
+
+        return $result;
     }
 
     private static function noMatchMessage(string $entityType, object $entity): string {

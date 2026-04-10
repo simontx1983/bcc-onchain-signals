@@ -114,6 +114,12 @@ final class SignalRefreshService
      */
     public static function dailyRefresh(): void
     {
+        // Prevent overlapping runs when WP-Cron fires on concurrent requests.
+        if (!\BCC\Onchain\Repositories\LockRepository::acquire('bcc_onchain_daily_refresh', 0)) {
+            return;
+        }
+
+        try {
         // Also process any pending bonus retries.
         BonusRetryService::processAll();
 
@@ -141,6 +147,10 @@ final class SignalRefreshService
 
             $offset += $batchSize;
         } while (count($owners) === $batchSize);
+
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release('bcc_onchain_daily_refresh');
+        }
     }
 
     /**

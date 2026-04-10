@@ -291,7 +291,7 @@ class EvmFetcher implements FetcherInterface
         ]);
 
         if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[EVM Fetcher] Collection fetch failed: ' . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[EVM Fetcher] Collection fetch failed: ' . preg_replace('/apikey=[^&]+/', 'apikey=***', $response->get_error_message()));
             return null;
         }
 

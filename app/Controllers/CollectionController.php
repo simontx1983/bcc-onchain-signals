@@ -57,6 +57,10 @@ final class CollectionController
 
     public static function get_collections(\WP_REST_Request $request): \WP_REST_Response
     {
+        if (!\BCC\Core\Security\Throttle::allow('nft_collections', 30, 60)) {
+            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+        }
+
         $chain   = $request->get_param('chain');
         $page    = (int) $request->get_param('page');
         $perPage = (int) $request->get_param('per_page');
@@ -64,8 +68,21 @@ final class CollectionController
 
         $data = CollectionRepository::getTopCollectionsByChainType($chain, $page, $perPage, $orderBy);
 
+        $publicFields = [
+            'id', 'contract_address', 'chain_slug', 'chain_name',
+            'collection_name', 'token_standard', 'total_supply',
+            'floor_price', 'floor_currency', 'unique_holders',
+            'total_volume', 'listed_percentage', 'royalty_percentage',
+            'image_url', 'explorer_url', 'native_token',
+        ];
+
+        $items = array_map(function ($item) use ($publicFields) {
+            $row = (array) $item;
+            return array_intersect_key($row, array_flip($publicFields));
+        }, $data['items']);
+
         return new \WP_REST_Response([
-            'items'  => $data['items'],
+            'items'  => $items,
             'total'  => $data['total'],
             'pages'  => $data['pages'],
             'chain'  => $chain,

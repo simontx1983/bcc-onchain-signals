@@ -23,15 +23,6 @@ class SettingsPage
         );
     }
 
-    public static function register_settings(): void
-    {
-        register_setting(self::OPT_GROUP, 'bcc_onchain_etherscan_key', [
-            'type'              => 'string',
-            'sanitize_callback' => 'sanitize_text_field',
-            'default'           => '',
-        ]);
-    }
-
     public static function render_page(): void
     {
         $key_from_config = defined('BCC_ETHERSCAN_API_KEY');

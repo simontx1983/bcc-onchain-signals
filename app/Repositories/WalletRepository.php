@@ -287,4 +287,18 @@ final class WalletRepository
             $userId, $chainId, $walletAddress
         ));
     }
+
+    /**
+     * Check whether a wallet address on a chain is already linked to a different user.
+     */
+    public static function existsForOtherUser(int $userId, int $chainId, string $walletAddress): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND wallet_address = %s",
+            $userId, $chainId, $walletAddress
+        ));
+    }
 }

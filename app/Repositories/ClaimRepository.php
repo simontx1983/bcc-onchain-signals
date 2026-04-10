@@ -20,7 +20,7 @@ class ClaimRepository {
                  chain_id, claim_role, status, verified_at, created_at';
 
     public static function table(): string {
-        return bcc_onchain_claims_table();
+        return \BCC\Core\DB\DB::table('onchain_claims');
     }
 
     /**
@@ -91,14 +91,20 @@ class ClaimRepository {
     /**
      * Get all verified claims for an entity.
      *
+     * Wallet addresses are NOT included by default to prevent data leaks.
+     * Pass $includeWalletAddress = true only when the caller needs it
+     * (e.g. admin views).
+     *
      * @return array Array of claim objects with user display_name.
      */
-    public static function getForEntity(string $entityType, int $entityId): array {
+    public static function getForEntity(string $entityType, int $entityId, bool $includeWalletAddress = false): array {
         global $wpdb;
         $table = self::table();
 
+        $walletCol = $includeWalletAddress ? ', cl.wallet_address' : '';
+
         return $wpdb->get_results($wpdb->prepare(
-            "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address,
+            "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id{$walletCol},
                     cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
                     u.display_name AS claimer_name
              FROM {$table} cl
@@ -141,8 +147,8 @@ class ClaimRepository {
 
         global $wpdb;
         $table       = self::table();
-        $validators  = bcc_onchain_validators_table();
-        $collections = bcc_onchain_collections_table();
+        $validators  = \BCC\Core\DB\DB::table('onchain_validators');
+        $collections = \BCC\Core\DB\DB::table('onchain_collections');
         $wallets     = \BCC\Core\DB\DB::table('wallet_links');
 
         $ph = implode(',', array_fill(0, count($pageIds), '%d'));
@@ -220,57 +226,156 @@ class ClaimRepository {
     }
 
     /**
-     * Compute the total claim bonus for a page.
+     * Atomically create an exclusive claim (operator/creator).
      *
-     * Sums bonuses from verified claims linked to the page via wallet_link
-     * (wallet-linked entities) and from claims on bulk-indexed entities
-     * belonging to the given user.
+     * Uses a MySQL advisory lock scoped to the entity+role to serialize
+     * concurrent claims. The lock prevents TOCTOU races between the
+     * getPrimaryClaim check and the upsert.
      *
-     * @param string $entityType  'validator' or 'collection'.
-     * @param string $entityTable Fully-qualified entity table name.
-     * @param string $walletTable Fully-qualified wallet_links table name.
-     * @param int    $pageId      Project page ID.
-     * @param int    $userId      User ID (for bulk-indexed entity fallback).
-     * @return float Total bonus.
+     * MySQL does not support partial unique indexes, so exclusivity for
+     * operator/creator roles is enforced at the application level with
+     * this advisory lock (not via a DB UNIQUE KEY, which would also
+     * block non-exclusive holder claims).
+     *
+     * @return array{success: bool, claim_id?: int, error?: string, message?: string}
+     */
+    public static function createExclusiveClaim(
+        int $userId,
+        string $entityType,
+        int $entityId,
+        string $walletAddress,
+        int $chainId,
+        string $role
+    ): array {
+        // Advisory lock scoped to this specific entity+role.
+        $lockKey = "bcc_claim:{$entityType}:{$entityId}:{$role}";
+        if (!LockRepository::acquire($lockKey, 5)) {
+            return ['success' => false, 'message' => 'Could not acquire claim lock. Please try again.'];
+        }
+
+        try {
+            // Under lock: check if anyone already holds this exclusive role.
+            $existingPrimary = self::getPrimaryClaim($entityType, $entityId, $role);
+
+            if ($existingPrimary) {
+                if ((int) $existingPrimary->user_id === $userId) {
+                    // Idempotent re-claim by the same user.
+                    return ['success' => true, 'claim_id' => (int) $existingPrimary->id];
+                }
+
+                $roleLabel = ucfirst($role);
+                return [
+                    'success' => false,
+                    'error'   => 'already_claimed',
+                    'message' => "This project already has a verified {$roleLabel}.",
+                ];
+            }
+
+            // No one holds this role yet — safe to upsert under the lock.
+            $claimId = self::upsert($userId, $entityType, $entityId, $walletAddress, $chainId, $role, 'verified');
+
+            if (!$claimId) {
+                return ['success' => false, 'message' => 'Failed to save claim.'];
+            }
+
+            return ['success' => true, 'claim_id' => $claimId];
+        } finally {
+            LockRepository::release($lockKey);
+        }
+    }
+
+    /**
+     * Delete all claims linked to a specific wallet address for a user.
+     *
+     * Called when a wallet is disconnected so that the trust bonus is revoked.
+     *
+     * @return int Number of rows deleted.
+     */
+    public static function deleteByUserAndWallet(int $userId, string $walletAddress): int {
+        global $wpdb;
+        $table = self::table();
+
+        return (int) $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s",
+            $userId,
+            $walletAddress
+        ));
+    }
+
+    /**
+     * Compute the total claim bonus for a page across ALL entity types.
+     *
+     * Aggregates validator AND collection claims. Wallet-linked entities are
+     * matched via wallet_link → post_id. Bulk-indexed entities (wallet_link_id
+     * IS NULL) are matched via the claiming user's ID.
      */
     public static function computePageClaimBonus(
-        string $entityType,
-        string $entityTable,
         string $walletTable,
         int $pageId,
         int $userId
     ): float {
         global $wpdb;
-        $table = self::table();
+        $table       = self::table();
+        $validators  = \BCC\Core\DB\DB::table('onchain_validators');
+        $collections = \BCC\Core\DB\DB::table('onchain_collections');
 
         return (float) $wpdb->get_var($wpdb->prepare(
             "SELECT COALESCE(SUM(bonus), 0) FROM (
+                /* Validator claims linked via wallet */
                 SELECT CASE
                     WHEN cl.claim_role IN ('operator','creator') THEN 5.0
                     WHEN cl.claim_role = 'holder' THEN 1.0
                     ELSE 0
                 END AS bonus
                 FROM {$table} cl
-                JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
+                JOIN {$validators} e ON e.id = cl.entity_id AND cl.entity_type = 'validator'
                 JOIN {$walletTable} w ON w.id = e.wallet_link_id
                 WHERE w.post_id = %d AND cl.status = 'verified'
 
                 UNION ALL
 
+                /* Validator claims on bulk-indexed entities (no wallet_link) */
                 SELECT CASE
                     WHEN cl.claim_role IN ('operator','creator') THEN 5.0
                     WHEN cl.claim_role = 'holder' THEN 1.0
                     ELSE 0
                 END AS bonus
                 FROM {$table} cl
-                JOIN {$entityTable} e ON e.id = cl.entity_id AND cl.entity_type = %s
+                JOIN {$validators} e ON e.id = cl.entity_id AND cl.entity_type = 'validator'
+                WHERE e.wallet_link_id IS NULL
+                  AND cl.status = 'verified'
+                  AND cl.user_id = %d
+
+                UNION ALL
+
+                /* Collection claims linked via wallet */
+                SELECT CASE
+                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
+                    WHEN cl.claim_role = 'holder' THEN 1.0
+                    ELSE 0
+                END AS bonus
+                FROM {$table} cl
+                JOIN {$collections} e ON e.id = cl.entity_id AND cl.entity_type = 'collection'
+                JOIN {$walletTable} w ON w.id = e.wallet_link_id
+                WHERE w.post_id = %d AND cl.status = 'verified'
+
+                UNION ALL
+
+                /* Collection claims on bulk-indexed entities (no wallet_link) */
+                SELECT CASE
+                    WHEN cl.claim_role IN ('operator','creator') THEN 5.0
+                    WHEN cl.claim_role = 'holder' THEN 1.0
+                    ELSE 0
+                END AS bonus
+                FROM {$table} cl
+                JOIN {$collections} e ON e.id = cl.entity_id AND cl.entity_type = 'collection'
                 WHERE e.wallet_link_id IS NULL
                   AND cl.status = 'verified'
                   AND cl.user_id = %d
             ) AS combined_bonuses",
-            $entityType,
             $pageId,
-            $entityType,
+            $userId,
+            $pageId,
             $userId
         ));
     }

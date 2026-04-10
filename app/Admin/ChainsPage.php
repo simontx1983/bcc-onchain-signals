@@ -80,38 +80,29 @@ class ChainsPage
 
             $stats = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
 
-            $enriched = 0;
-            $enrichErrors = 0;
-
-            if ($fetcher->supports_feature('validator')) {
-                $rows = ValidatorRepository::getActiveForChain((int) $chain->id, 500);
-
-                foreach ($rows as $row) {
-                    try {
-                        $data = $fetcher->fetch_validator($row->operator_address);
-                        if (!empty($data)) {
-                            ValidatorRepository::enrichByOperator($data, HOUR_IN_SECONDS);
-                            $enriched++;
-                        }
-                    } catch (\Throwable $e) {
-                        $enrichErrors++;
-                    }
-                }
+            // Per-validator enrichment is handled by the hourly EnrichmentScheduler
+            // cron, not inline during admin refresh. Running 500 sequential API calls
+            // in a single AJAX request guarantees a PHP timeout.
+            // Schedule an immediate enrichment run if one isn't already pending.
+            $enrichHook = 'bcc_refresh_validators';
+            $scheduled  = false;
+            if (!wp_next_scheduled($enrichHook)) {
+                $scheduled = wp_schedule_single_event(time() + 10, $enrichHook);
             }
 
-            $stats['enriched'] = $enriched;
+            $stats['enriched'] = 0;
 
             wp_send_json_success([
                 'message' => sprintf(
-                    '%s: %d indexed (%d new, %d updated), %d enriched%s.',
+                    '%s: %d indexed (%d new, %d updated). %s',
                     $chain->name,
                     $stats['total'],
                     $stats['new'],
                     $stats['updated'],
-                    $enriched,
-                    $enrichErrors > 0 ? ", {$enrichErrors} enrich errors" : ''
+                    $scheduled ? 'Enrichment scheduled.' : 'Enrichment already scheduled.'
                 ),
-                'stats' => $stats,
+                'stats'     => $stats,
+                'scheduled' => (bool) $scheduled,
             ]);
         } catch (\Throwable $e) {
             wp_send_json_error(['message' => $chain->name . ': ' . $e->getMessage()]);

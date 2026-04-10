@@ -39,7 +39,10 @@ class ChainRefreshService
         add_action('bcc_index_validators',   [__CLASS__, 'index_validators']);
         add_action('bcc_index_collections',  [__CLASS__, 'index_collections']);
 
-        add_action('admin_init', [__CLASS__, 'schedule_crons']);
+        // Schedule crons directly — init() is already called during plugins_loaded,
+        // so hooking plugins_loaded again would never fire.
+        // wp_next_scheduled() prevents double-scheduling on every request.
+        self::schedule_crons();
     }
 
     /**
@@ -89,12 +92,12 @@ class ChainRefreshService
     private const LOCK_GROUP = 'bcc_cron';
 
     /**
-     * Acquire an atomic Redis-backed lock for a cron job.
-     * wp_cache_add() only succeeds if the key doesn't exist — atomic.
+     * Acquire a MySQL advisory lock for a cron job.
+     * Advisory locks are cross-request and don't require persistent object cache.
      */
     private static function acquireLock(string $job, int $ttl = 900): bool
     {
-        $acquired = wp_cache_add('lock_' . $job, time(), self::LOCK_GROUP, $ttl);
+        $acquired = \BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_GROUP . ':' . $job, 0);
 
         if (!$acquired) {
             \BCC\Core\Log\Logger::info('[Onchain] Skipping ' . $job . ' — previous run still locked.');
@@ -106,7 +109,7 @@ class ChainRefreshService
 
     private static function releaseLock(string $job): void
     {
-        wp_cache_delete('lock_' . $job, self::LOCK_GROUP);
+        \BCC\Onchain\Repositories\LockRepository::release(self::LOCK_GROUP . ':' . $job);
     }
 
     // ── Validator Indexing (bulk — all validators per chain) ────────────────
@@ -127,71 +130,73 @@ class ChainRefreshService
             return;
         }
 
-        // Index all chain types that support validators.
-        $chains = array_merge(
-            ChainRepository::getActive('cosmos'),
-            ChainRepository::getActive('thorchain'),
-            ChainRepository::getActive('solana'),
-            ChainRepository::getActive('polkadot'),
-            ChainRepository::getActive('near')
-        );
+        try {
+            // Index all chain types that support validators.
+            $chains = array_merge(
+                ChainRepository::getActive('cosmos'),
+                ChainRepository::getActive('thorchain'),
+                ChainRepository::getActive('solana'),
+                ChainRepository::getActive('polkadot'),
+                ChainRepository::getActive('near')
+            );
 
-        foreach ($chains as $chain) {
-            $chainId = (int) $chain->id;
+            foreach ($chains as $chain) {
+                $chainId = (int) $chain->id;
 
-            // Skip chains whose circuit breaker is open (consistently failing).
-            if (CircuitBreaker::isOpen($chainId)) {
-                \BCC\Core\Log\Logger::info('[Onchain] Skipping index for ' . $chain->name . ' — circuit breaker open');
-                continue;
-            }
-
-            try {
-                if (!FetcherFactory::has_driver($chain->chain_type)) {
+                // Skip chains whose circuit breaker is open (consistently failing).
+                if (CircuitBreaker::isOpen($chainId)) {
+                    \BCC\Core\Log\Logger::info('[Onchain] Skipping index for ' . $chain->name . ' — circuit breaker open');
                     continue;
                 }
 
-                $fetcher = FetcherFactory::make_for_chain($chain);
+                try {
+                    if (!FetcherFactory::has_driver($chain->chain_type)) {
+                        continue;
+                    }
 
-                if (!method_exists($fetcher, 'fetch_all_validators')) {
-                    continue;
-                }
+                    $fetcher = FetcherFactory::make_for_chain($chain);
 
-                $validators = $fetcher->fetch_all_validators();
+                    if (!method_exists($fetcher, 'fetch_all_validators')) {
+                        continue;
+                    }
 
-                if (!empty($validators)) {
-                    $stats = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
+                    $validators = $fetcher->fetch_all_validators();
 
-                    // Persist per-chain stats for the admin dashboard.
-                    $allStats = get_option('bcc_onchain_indexer_stats', []);
-                    $allStats[$chain->slug] = array_merge($stats, [
-                        'chain'     => $chain->name,
-                        'timestamp' => current_time('mysql', true),
-                    ]);
-                    update_option('bcc_onchain_indexer_stats', $allStats, false);
+                    if (!empty($validators)) {
+                        $stats = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
 
-                    \BCC\Core\Log\Logger::info(sprintf(
-                        '[Onchain] Indexed %s: %d total, %d new, %d updated, %d unchanged, %d refreshed',
-                        $chain->name, $stats['total'], $stats['new'], $stats['updated'],
-                        $stats['unchanged'], $stats['refreshed'] ?? 0
-                    ));
+                        // Persist per-chain stats for the admin dashboard.
+                        $allStats = get_option('bcc_onchain_indexer_stats', []);
+                        $allStats[$chain->slug] = array_merge($stats, [
+                            'chain'     => $chain->name,
+                            'timestamp' => current_time('mysql', true),
+                        ]);
+                        update_option('bcc_onchain_indexer_stats', $allStats, false);
 
-                    CircuitBreaker::recordSuccess($chainId);
-                } else {
-                    // Empty result from an active chain is suspicious
+                        \BCC\Core\Log\Logger::info(sprintf(
+                            '[Onchain] Indexed %s: %d total, %d new, %d updated, %d unchanged, %d refreshed',
+                            $chain->name, $stats['total'], $stats['new'], $stats['updated'],
+                            $stats['unchanged'], $stats['refreshed'] ?? 0
+                        ));
+
+                        CircuitBreaker::recordSuccess($chainId);
+                    } else {
+                        // Empty result from an active chain is suspicious
+                        CircuitBreaker::recordFailure($chainId);
+                        \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
+                    }
+                } catch (\Exception $e) {
                     CircuitBreaker::recordFailure($chainId);
-                    \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
+                    \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
-            } catch (\Exception $e) {
-                CircuitBreaker::recordFailure($chainId);
-                \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
             }
+
+            // After indexing, clean up validators that the indexer hasn't seen
+            // in 30+ days and have exhausted retry attempts — they're gone.
+            EnrichmentScheduler::markDeadValidators();
+        } finally {
+            self::releaseLock('index_validators');
         }
-
-        // After indexing, clean up validators that the indexer hasn't seen
-        // in 30+ days and have exhausted retry attempts — they're gone.
-        EnrichmentScheduler::markDeadValidators();
-
-        self::releaseLock('index_validators');
     }
 
     // ── Collection Indexing (bulk — top NFT collections per EVM chain) ─────
@@ -210,47 +215,49 @@ class ChainRefreshService
             return;
         }
 
-        // Process all chain types that may support top collections.
-        // Each chain type is indexed independently — no cross-chain mixing.
-        $chain_types = ['evm', 'solana', 'cosmos'];
+        try {
+            // Process all chain types that may support top collections.
+            // Each chain type is indexed independently — no cross-chain mixing.
+            $chain_types = ['evm', 'solana', 'cosmos'];
 
-        foreach ($chain_types as $type) {
-            $chains = ChainRepository::getActive($type);
+            foreach ($chain_types as $type) {
+                $chains = ChainRepository::getActive($type);
 
-            foreach ($chains as $chain) {
-                $chainId = (int) $chain->id;
+                foreach ($chains as $chain) {
+                    $chainId = (int) $chain->id;
 
-                if (CircuitBreaker::isOpen($chainId)) {
-                    \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
-                    continue;
-                }
-
-                try {
-                    if (!FetcherFactory::has_driver($chain->chain_type)) {
+                    if (CircuitBreaker::isOpen($chainId)) {
+                        \BCC\Core\Log\Logger::info('[Onchain] Skipping collection index for ' . $chain->name . ' — circuit breaker open');
                         continue;
                     }
 
-                    $fetcher = FetcherFactory::make_for_chain($chain);
+                    try {
+                        if (!FetcherFactory::has_driver($chain->chain_type)) {
+                            continue;
+                        }
 
-                    if (!$fetcher->supports_feature('top_collections')) {
-                        continue;
+                        $fetcher = FetcherFactory::make_for_chain($chain);
+
+                        if (!$fetcher->supports_feature('top_collections')) {
+                            continue;
+                        }
+
+                        $collections = $fetcher->fetch_top_collections(100);
+
+                        if (!empty($collections)) {
+                            $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
+                            \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
+                            CircuitBreaker::recordSuccess($chainId);
+                        }
+                    } catch (\Exception $e) {
+                        CircuitBreaker::recordFailure($chainId);
+                        \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
                     }
-
-                    $collections = $fetcher->fetch_top_collections(100);
-
-                    if (!empty($collections)) {
-                        $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
-                        \BCC\Core\Log\Logger::info('[Onchain] Indexed ' . $count . ' collections for ' . $chain->name);
-                        CircuitBreaker::recordSuccess($chainId);
-                    }
-                } catch (\Exception $e) {
-                    CircuitBreaker::recordFailure($chainId);
-                    \BCC\Core\Log\Logger::error('[Onchain] Collection index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
             }
+        } finally {
+            self::releaseLock('index_collections');
         }
-
-        self::releaseLock('index_collections');
     }
 
     // ── Validator Refresh (scheduler-driven) ─────────────────────────────────
@@ -280,55 +287,67 @@ class ChainRefreshService
             return;
         }
 
-        $expired = CollectionRepository::getExpired(self::BATCH_SIZE);
+        try {
+            $expired = CollectionRepository::getExpired(self::BATCH_SIZE);
 
-        if (empty($expired)) {
-            self::releaseLock('refresh_collections');
-            return;
-        }
+            if (empty($expired)) {
+                return;
+            }
 
-        foreach ($expired as $row) {
-            try {
-                $chain = ChainRepository::getById((int) $row->chain_id);
-                if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
-                    continue;
-                }
-
-                $fetcher = FetcherFactory::make_for_chain($chain);
-
-                if (!$fetcher->supports_feature('collection')) {
-                    continue;
-                }
-
-                // Resolve the wallet address from the wallet link
-                $wallet = WalletRepository::getById((int) $row->wallet_link_id);
-                if (!$wallet) {
-                    continue;
-                }
-
-                $collections = $fetcher->fetch_collections($wallet->wallet_address, (int) $row->chain_id);
-
-                if (!empty($collections)) {
-                    foreach ($collections as $collection) {
-                        CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS);
+            foreach ($expired as $row) {
+                try {
+                    $chain = ChainRepository::getById((int) $row->chain_id);
+                    if (!$chain || !FetcherFactory::has_driver($chain->chain_type)) {
+                        continue;
                     }
 
-                    if ((int) $wallet->post_id > 0) {
-                        CollectionService::invalidate((int) $wallet->post_id);
+                    $fetcher = FetcherFactory::make_for_chain($chain);
+
+                    if (!$fetcher->supports_feature('collection')) {
+                        continue;
                     }
-                } else {
-                    // Empty response after retries — backoff to prevent tight re-fetch
-                    // loop on wallets with deleted collections or failing chain APIs.
+
+                    // Bulk-indexed collections (wallet_link_id = NULL) are refreshed
+                    // via top_collections re-fetch — just extend their TTL here so
+                    // they don't clog the expired queue between 4-hour index runs.
+                    if (empty($row->wallet_link_id)) {
+                        if ($fetcher->supports_feature('top_collections')) {
+                            // Backoff extends expires_at, preventing re-fetch every cycle.
+                            CollectionRepository::backoffRow((int) $row->id);
+                        }
+                        continue;
+                    }
+
+                    // Wallet-linked collections: resolve address from wallet link.
+                    $wallet = WalletRepository::getById((int) $row->wallet_link_id);
+                    if (!$wallet) {
+                        continue;
+                    }
+
+                    $collections = $fetcher->fetch_collections($wallet->wallet_address, (int) $row->chain_id);
+
+                    if (!empty($collections)) {
+                        foreach ($collections as $collection) {
+                            CollectionRepository::upsert($collection, (int) $row->wallet_link_id, 4 * HOUR_IN_SECONDS);
+                        }
+
+                        if ((int) $wallet->post_id > 0) {
+                            CollectionService::invalidate((int) $wallet->post_id);
+                        }
+                    } else {
+                        // Empty response after retries — backoff to prevent tight re-fetch
+                        // loop on wallets with deleted collections or failing chain APIs.
+                        CollectionRepository::backoffRow((int) $row->id);
+                    }
+                } catch (\Exception $e) {
+                    CircuitBreaker::recordFailure((int) $row->chain_id);
+                    \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
                     CollectionRepository::backoffRow((int) $row->id);
                 }
-            } catch (\Exception $e) {
-                CircuitBreaker::recordFailure((int) $row->chain_id);
-                \BCC\Core\Log\Logger::error('[Onchain] Collection ' . $row->contract_address . ' refresh failed: ' . $e->getMessage());
-                CollectionRepository::backoffRow((int) $row->id);
             }
+        } finally {
+            self::releaseLock('refresh_collections');
         }
-
-        self::releaseLock('refresh_collections');
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

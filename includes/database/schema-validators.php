@@ -60,19 +60,5 @@ function bcc_onchain_create_validators_table(): void {
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
-
-    // Migrate existing rows: stagger next_enrichment_at so they don't all
-    // fire on the first cron tick after upgrade.
-    $col_exists = $wpdb->get_var(
-        "SELECT COUNT(*) FROM {$table} WHERE next_enrichment_at IS NOT NULL LIMIT 1"
-    );
-    if ((int) $col_exists === 0) {
-        $wpdb->query(
-            "UPDATE {$table}
-             SET next_enrichment_at = DATE_ADD(NOW(), INTERVAL FLOOR(RAND() * 14400) SECOND),
-                 last_enriched_at   = fetched_at
-             WHERE next_enrichment_at IS NULL"
-        );
-    }
 }
 

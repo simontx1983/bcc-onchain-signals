@@ -28,6 +28,9 @@ use BCC\Onchain\Support\CircuitBreaker;
 
 final class EnrichmentScheduler
 {
+    /** @var int API call count at the start of this run (baseline for delta tracking). */
+    private static int $apiBaseline = 0;
+
     // ── Budget limits ───────────────────────────────────────────────────────
     const MAX_VALIDATORS_PER_RUN  = 100;
     const MAX_API_CALLS_PER_RUN   = 200;  // global safety cap
@@ -72,8 +75,10 @@ final class EnrichmentScheduler
         }
 
         try {
-            // ── Reset API budget counter for this run ────────────────────
-            self::resetApiCounter();
+            // ── Snapshot API counter baseline for this run ──────────────
+            // Do NOT reset — the indexer may be concurrently incrementing.
+            // Track budget as delta from this baseline instead.
+            self::$apiBaseline = self::getApiCount();
 
             // ── Fetch prioritized batch from DB ─────────────────────────
             $batch = self::fetchBatch();
@@ -90,17 +95,12 @@ final class EnrichmentScheduler
             $processed = 0;
             foreach ($batch as $row) {
                 // Budget check BEFORE starting work on this validator.
-                $apiUsed = self::getApiCount();
+                // Uses delta from baseline to ignore concurrent indexer calls.
+                $apiUsed = self::getApiCount() - self::$apiBaseline;
                 if ($apiUsed >= self::MAX_API_CALLS_PER_RUN) {
                     $result['stopped_reason'] = 'api_budget';
                     self::log("Scheduler: API budget reached ({$apiUsed} calls). Stopping.");
                     break;
-                }
-
-                // Heartbeat: extend lock every 10 validators so a slow batch
-                // (network timeouts, large enrichments) never loses its lock.
-                if ($processed > 0 && $processed % 10 === 0) {
-                    self::extendLock();
                 }
 
                 // Per-chain fairness: skip validators whose chain has exhausted
@@ -131,7 +131,7 @@ final class EnrichmentScheduler
                 $processed++;
             }
 
-            $result['api_calls'] = self::getApiCount();
+            $result['api_calls'] = self::getApiCount() - self::$apiBaseline;
 
         } finally {
             self::releaseLock();
@@ -336,55 +336,41 @@ final class EnrichmentScheduler
     // =====================================================================
 
     /**
-     * Acquire Redis lock. Returns false if another run is in progress.
-     * Uses wp_cache_add() which is atomic — only succeeds if key doesn't exist.
+     * Acquire MySQL advisory lock. Returns false if another run is in progress.
+     * GET_LOCK is session-scoped — auto-releases on process crash or disconnect.
+     * Timeout 0 = non-blocking (fail immediately if already held).
      */
     private static function acquireLock(): bool
     {
-        return (bool) wp_cache_add(self::LOCK_KEY, time(), self::CACHE_GROUP, self::LOCK_TTL);
-    }
-
-    /**
-     * Extend the lock TTL (heartbeat). Called every 10 validators during
-     * processing so a slow batch never loses its lock mid-run.
-     * If the process crashes, the lock still expires after LOCK_TTL seconds.
-     */
-    private static function extendLock(): void
-    {
-        wp_cache_set(self::LOCK_KEY, time(), self::CACHE_GROUP, self::LOCK_TTL);
+        return \BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 0);
     }
 
     private static function releaseLock(): void
     {
-        wp_cache_delete(self::LOCK_KEY, self::CACHE_GROUP);
+        \BCC\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
     }
 
     /**
-     * Reset all API call counters at the start of each run.
-     * Clears global + per-chain counters so stale counts from the
-     * indexer (same PHP request) don't block enrichment.
+     * In-process fallback counters for hosts without persistent object cache.
+     * wp_cache is volatile per-request without Redis/Memcached, so these
+     * static counters ensure budget enforcement within a single cron run.
      */
-    private static function resetApiCounter(): void
-    {
-        wp_cache_set(self::API_COUNTER_KEY, 0, self::CACHE_GROUP, self::LOCK_TTL);
-
-        // Reset per-chain counters for all active chains.
-        $chains = ChainRepository::getActive();
-        foreach ($chains as $chain) {
-            $chainKey = self::API_COUNTER_KEY . ':' . (int) $chain->id;
-            wp_cache_delete($chainKey, self::CACHE_GROUP);
-        }
-    }
+    private static int $staticGlobalCount = 0;
+    private static array $staticChainCounts = [];
 
     /**
      * Atomically increment BOTH the global and per-chain API call counters.
-     * Called by the fetcher's lcdGet wrapper.
+     * Uses wp_cache for cross-request persistence (Redis) with an in-process
+     * static fallback that always works regardless of cache backend.
      *
      * @param int $chainId Chain ID for per-chain budget tracking.
      */
     public static function trackApiCall(int $chainId = 0): void
     {
-        // Global counter.
+        // Always increment static counters (works without Redis).
+        self::$staticGlobalCount++;
+
+        // Try wp_cache for cross-request persistence.
         $result = wp_cache_incr(self::API_COUNTER_KEY, 1, self::CACHE_GROUP);
         if ($result === false) {
             wp_cache_set(self::API_COUNTER_KEY, 1, self::CACHE_GROUP, self::LOCK_TTL);
@@ -392,6 +378,8 @@ final class EnrichmentScheduler
 
         // Per-chain counter (if chain specified).
         if ($chainId > 0) {
+            self::$staticChainCounts[$chainId] = (self::$staticChainCounts[$chainId] ?? 0) + 1;
+
             $chainKey = self::API_COUNTER_KEY . ':' . $chainId;
             $result   = wp_cache_incr($chainKey, 1, self::CACHE_GROUP);
             if ($result === false) {
@@ -402,10 +390,12 @@ final class EnrichmentScheduler
 
     /**
      * Read current global API call count.
+     * Returns the higher of wp_cache (cross-request) and static (in-process).
      */
     public static function getApiCount(): int
     {
-        return (int) (wp_cache_get(self::API_COUNTER_KEY, self::CACHE_GROUP) ?: 0);
+        $cached = (int) (wp_cache_get(self::API_COUNTER_KEY, self::CACHE_GROUP) ?: 0);
+        return max($cached, self::$staticGlobalCount);
     }
 
     /**
@@ -414,7 +404,8 @@ final class EnrichmentScheduler
     public static function getChainApiCount(int $chainId): int
     {
         $chainKey = self::API_COUNTER_KEY . ':' . $chainId;
-        return (int) (wp_cache_get($chainKey, self::CACHE_GROUP) ?: 0);
+        $cached = (int) (wp_cache_get($chainKey, self::CACHE_GROUP) ?: 0);
+        return max($cached, self::$staticChainCounts[$chainId] ?? 0);
     }
 
     /**

@@ -150,63 +150,6 @@ final class CollectionRepository
     }
 
     /**
-     * Get top collections globally (not per-project). Used by the discovery
-     * collection leaderboard and "Claim Your Community" feed.
-     *
-     * @return array{items: array, total: int, pages: int}
-     */
-    public static function getTopCollections(int $page = 1, int $perPage = 20, string $orderBy = 'total_volume', ?int $chainId = null): array
-    {
-        global $wpdb;
-        $table  = self::table();
-        $chains = ChainRepository::table();
-
-        $allowedOrder = ['total_volume', 'floor_price', 'unique_holders', 'total_supply'];
-        if (!in_array($orderBy, $allowedOrder, true)) {
-            $orderBy = 'total_volume';
-        }
-
-        $offset = ($page - 1) * $perPage;
-
-        $where  = '1=1';
-        $params = [];
-
-        if ($chainId) {
-            $where   .= ' AND c.chain_id = %d';
-            $params[] = $chainId;
-        }
-
-        $countSql = "SELECT COUNT(*) FROM {$table} c WHERE {$where}";
-        $mainSql  = "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
-                    c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
-                    c.unique_holders, c.total_volume, c.listed_percentage, c.royalty_percentage,
-                    c.metadata_storage, c.image_url, c.show_on_profile, c.fetched_at, c.expires_at,
-                    ch.slug AS chain_slug, ch.name AS chain_name, ch.explorer_url, ch.native_token
-                     FROM {$table} c
-                     JOIN {$chains} ch ON ch.id = c.chain_id
-                     WHERE {$where}
-                     ORDER BY c.{$orderBy} DESC
-                     LIMIT %d OFFSET %d";
-
-        $countParams = $params;
-        $mainParams  = array_merge($params, [$perPage, $offset]);
-
-        $total = empty($countParams)
-            ? (int) $wpdb->get_var($countSql)
-            : (int) $wpdb->get_var($wpdb->prepare($countSql, ...$countParams));
-
-        $items = empty($mainParams)
-            ? $wpdb->get_results($mainSql)
-            : $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
-
-        return [
-            'items' => $items ?: [],
-            'total' => $total,
-            'pages' => $perPage > 0 ? (int) ceil($total / $perPage) : 0,
-        ];
-    }
-
-    /**
      * Get top collections filtered by chain type (evm, solana, cosmos).
      * Each chain type is ranked independently — no cross-chain mixing.
      *
@@ -453,6 +396,21 @@ final class CollectionRepository
         return $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table} WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT %d",
             $limit
+        ));
+    }
+
+    /**
+     * Check whether any collection rows exist for a given wallet_link.
+     * Used by WalletSeedService to skip redundant API calls.
+     */
+    public static function existsForWalletLink(int $walletLinkId): bool
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT 1 FROM {$table} WHERE wallet_link_id = %d LIMIT 1",
+            $walletLinkId
         ));
     }
 

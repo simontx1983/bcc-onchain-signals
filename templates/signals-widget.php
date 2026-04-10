@@ -8,6 +8,13 @@ if (empty($signals)) {
 }
 
 $total_bonus = array_sum(array_column($signals, 'score_contribution'));
+
+// Ownership check: only the page owner and admins see wallet addresses.
+$_bcc_current_user = get_current_user_id();
+$_bcc_post         = get_post($page_id);
+$_bcc_is_owner     = $_bcc_post && (int) $_bcc_post->post_author === $_bcc_current_user;
+$_bcc_is_admin     = current_user_can('manage_options');
+$_bcc_show_addr    = $_bcc_is_owner || $_bcc_is_admin;
 ?>
 <div class="bcc-onchain-widget">
     <div class="bcc-onchain-widget__header">
@@ -18,14 +25,18 @@ $total_bonus = array_sum(array_column($signals, 'score_contribution'));
     <?php foreach ($signals as $row):
         $bd = \BCC\Onchain\Services\SignalScorer::breakdown($row);
         $chain_label = ucfirst($row['chain'] ?? 'Unknown');
-        $addr = $row['wallet_address'] ?? '';
-        $short_addr = strlen($addr) > 12 ? substr($addr, 0, 6) . '…' . substr($addr, -4) : $addr;
         $age_years  = $row['wallet_age_days'] > 0 ? round($row['wallet_age_days'] / 365, 1) : null;
+
+        // Only show wallet addresses to the page owner / admins.
+        $addr       = $_bcc_show_addr ? ($row['wallet_address'] ?? '') : '';
+        $short_addr = strlen($addr) > 12 ? substr($addr, 0, 6) . '…' . substr($addr, -4) : '';
     ?>
     <div class="bcc-onchain-chain-card">
         <div class="bcc-onchain-chain-card__header">
             <span class="bcc-onchain-chain-label"><?php echo esc_html($chain_label); ?></span>
-            <span class="bcc-onchain-chain-addr" title="<?php echo esc_attr($addr); ?>"><?php echo esc_html($short_addr); ?></span>
+            <?php if ($short_addr): ?>
+                <span class="bcc-onchain-chain-addr" title="<?php echo esc_attr($addr); ?>"><?php echo esc_html($short_addr); ?></span>
+            <?php endif; ?>
             <span class="bcc-onchain-chain-score">+<?php echo round($row['score_contribution'], 1); ?> pts</span>
         </div>
 

@@ -20,8 +20,16 @@ use BCC\Onchain\Support\ApiRetry;
 class SignalFetcher
 {
     const ETHERSCAN_BASE = 'https://api.etherscan.io/api';
-    const SOLANA_RPC     = 'https://api.mainnet-beta.solana.com';
     const HTTP_TIMEOUT   = 10;
+
+    /**
+     * Resolve Solana RPC URL. Uses BCC_SOLANA_RPC_URL constant if defined,
+     * otherwise falls back to the public mainnet endpoint (rate-limited).
+     */
+    private static function getSolanaRpcUrl(): string
+    {
+        return defined('BCC_SOLANA_RPC_URL') ? BCC_SOLANA_RPC_URL : 'https://api.mainnet-beta.solana.com';
+    }
 
     /**
      * Validate wallet address format before making external API calls.
@@ -80,7 +88,6 @@ class SignalFetcher
      */
     public static function get_connected_wallets(int $user_id): array
     {
-        // NullWalletLinkRead::getLinksForUser() returns [] — same as old fallback.
         return ServiceLocator::resolveWalletLinkRead()->getLinksForUser($user_id);
     }
 
@@ -92,6 +99,7 @@ class SignalFetcher
 
         if (!$api_key) {
             \BCC\Core\Log\Logger::error('[Onchain] BCC_ETHERSCAN_API_KEY not defined in wp-config.php');
+            return null;
         }
 
         $all_txs = self::etherscanRequest([
@@ -171,7 +179,6 @@ class SignalFetcher
             }
         }
 
-        $tx_count_capped = ($tx_count === 1000);
         $contract_count  = 0;
 
         return [
@@ -183,7 +190,7 @@ class SignalFetcher
                 'source'           => 'solana_rpc',
                 'wallet_age_days'  => $wallet_age_days,
                 'tx_count'         => $tx_count,
-                'tx_count_capped'  => $tx_count_capped,
+                'tx_count_capped'  => ($tx_count === 1000),
             ],
         ];
     }
@@ -203,15 +210,18 @@ class SignalFetcher
     {
         $url      = add_query_arg($params, self::ETHERSCAN_BASE);
 
+        $chainId = \BCC\Onchain\Repositories\ChainRepository::resolveId('ethereum');
+
         $response = ApiRetry::get($url, [
             'timeout'   => self::HTTP_TIMEOUT,
             'sslverify' => true,
         ], [
-            'label' => 'Etherscan signal ' . ($params['action'] ?? 'query'),
+            'label'    => 'Etherscan signal ' . ($params['action'] ?? 'query'),
+            'chain_id' => $chainId ?? 0,
         ]);
 
         if (is_wp_error($response)) {
-            \BCC\Core\Log\Logger::error('[Onchain] Etherscan request failed: ' . $response->get_error_message());
+            \BCC\Core\Log\Logger::error('[Onchain] Etherscan request failed: ' . preg_replace('/apikey=[^&]+/', 'apikey=***', $response->get_error_message()));
             return null;
         }
 
@@ -230,13 +240,16 @@ class SignalFetcher
     {
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);
 
-        $response = ApiRetry::post(self::SOLANA_RPC, [
+        $chainId = \BCC\Onchain\Repositories\ChainRepository::resolveId('solana');
+
+        $response = ApiRetry::post(self::getSolanaRpcUrl(), [
             'timeout'     => self::HTTP_TIMEOUT,
             'headers'     => ['Content-Type' => 'application/json'],
             'body'        => $body,
             'sslverify'   => true,
         ], [
-            'label' => 'Solana signal ' . $method,
+            'label'    => 'Solana signal ' . $method,
+            'chain_id' => $chainId ?? 0,
         ]);
 
         if (is_wp_error($response)) {

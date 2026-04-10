@@ -24,8 +24,8 @@ class SolanaFetcher implements FetcherInterface
     private object $chain;
     private string $rpc_url;
 
-    /** @var array|null Cached vote accounts for the current PHP process. */
-    private static ?array $voteAccountsCache = null;
+    /** @var array Cached vote accounts keyed by RPC URL (per PHP process). */
+    private static array $voteAccountsCache = [];
 
     public function __construct(object $chain)
     {
@@ -276,14 +276,15 @@ class SolanaFetcher implements FetcherInterface
      */
     private function getVoteAccounts(): array
     {
-        if (self::$voteAccountsCache !== null) {
-            return self::$voteAccountsCache;
+        $cacheKey = $this->rpc_url;
+        if (isset(self::$voteAccountsCache[$cacheKey])) {
+            return self::$voteAccountsCache[$cacheKey];
         }
 
         $result = $this->rpcCall('getVoteAccounts', []);
 
         if (!is_array($result)) {
-            self::$voteAccountsCache = [];
+            self::$voteAccountsCache[$cacheKey] = [];
             return [];
         }
 
@@ -297,8 +298,8 @@ class SolanaFetcher implements FetcherInterface
         }
         unset($v);
 
-        self::$voteAccountsCache = array_merge($current, $delinquent);
-        return self::$voteAccountsCache;
+        self::$voteAccountsCache[$cacheKey] = array_merge($current, $delinquent);
+        return self::$voteAccountsCache[$cacheKey];
     }
 
     /**

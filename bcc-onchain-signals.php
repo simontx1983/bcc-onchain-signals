@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blue Collar Crypto – On-Chain Signals
  * Description: Enriches BCC trust scores with on-chain data: wallet age, transaction depth, and smart contract deployments (Ethereum & Solana).
- * Version: 1.6.1
+ * Version: 1.0.0
  * Author: Blue Collar Labs LLC
  * Text Domain: bcc-onchain
  * Requires at least: 5.8
@@ -39,18 +39,19 @@ if ( ! defined( 'BCC_CORE_VERSION' ) ) {
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────
-define('BCC_ONCHAIN_VERSION', '1.9.0');
+define('BCC_ONCHAIN_VERSION', '1.0.0');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 
-// Signal score caps per category (per-wallet max: 40)
-define('BCC_ONCHAIN_MAX_AGE_SCORE',      20);
-define('BCC_ONCHAIN_MAX_DEPTH_SCORE',    10);
-define('BCC_ONCHAIN_MAX_CONTRACT_SCORE', 10);
+// Signal score caps per category — must match actual scorer tier maximums.
+// ageScore max=8, depthScore max=7, contractScore max=8*0.6=4.8 → total ~20
+define('BCC_ONCHAIN_MAX_AGE_SCORE',       8);
+define('BCC_ONCHAIN_MAX_DEPTH_SCORE',     7);
+define('BCC_ONCHAIN_MAX_CONTRACT_SCORE',  5);
 define('BCC_ONCHAIN_CACHE_HOURS',        24);
 
 // Total on-chain bonus cap per page, across all wallets and chains.
-define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    40);
+define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20);
 
 // ── Composer autoloader ─────────────────────────────────────────────────────
 $bcc_onchain_autoload = BCC_ONCHAIN_PATH . 'vendor/autoload.php';
@@ -78,7 +79,6 @@ use BCC\Onchain\Repositories\SignalRepository;
 use BCC\Onchain\Services\BonusRetryService;
 use BCC\Onchain\Services\BonusService;
 use BCC\Onchain\Services\ChainRefreshService;
-use BCC\Onchain\Services\MigrationService;
 use BCC\Onchain\Services\SignalRefreshService;
 use BCC\Onchain\Services\WalletSeedService;
 
@@ -104,6 +104,9 @@ register_activation_hook(__FILE__, function () {
     if (!wp_next_scheduled('bcc_onchain_retry_bonus')) {
         wp_schedule_event(time(), 'hourly', 'bcc_onchain_retry_bonus');
     }
+
+    // Schedule chain-refresh crons on activation (not just admin_init).
+    ChainRefreshService::schedule_crons();
 });
 
 register_deactivation_hook(__FILE__, function () {
@@ -150,29 +153,7 @@ add_action('plugins_loaded', function (): void {
         return new \BCC\Onchain\Services\OnchainDataReadService();
     });
 
-    // ── Schema migration on version change ────────────────────────────────
-    // Runs dbDelta for new columns (next_enrichment_at, decimals, bech32_prefix)
-    // without requiring plugin deactivation/reactivation.
-    $stored_version = get_option('bcc_onchain_version', '0');
-    if (version_compare($stored_version, BCC_ONCHAIN_VERSION, '<')) {
-        bcc_onchain_ensure_schema();
-
-        // 1.7.1: One-time fix — reset next_enrichment_at for validators stuck
-        // with self_stake=0 from the %f/NULL bug so the enrichment scheduler
-        // picks them up immediately instead of waiting for their jittered schedule.
-        if (version_compare($stored_version, '1.7.1', '<')) {
-            global $wpdb;
-            $vTable = \BCC\Onchain\Repositories\ValidatorRepository::table();
-            $wpdb->query(
-                "UPDATE {$vTable}
-                 SET next_enrichment_at = NOW()
-                 WHERE (self_stake = 0 OR self_stake IS NULL)
-                   AND status != 'inactive'"
-            );
-        }
-
-        update_option('bcc_onchain_version', BCC_ONCHAIN_VERSION);
-    }
+    /* Tables created by activation hook only. */
 
     // ── Core service init ───────────────────────────────────────────────────
     ChainRefreshService::init();
@@ -185,15 +166,58 @@ add_action('plugins_loaded', function (): void {
 
     // ── Domain event hooks ──────────────────────────────────────────────────
     add_action('bcc_onchain_claim_verified', [BonusService::class,      'applyClaimBonus'], 10, 4);
+    // Schedule wallet seed as async cron event — external API calls (Etherscan, etc.)
+    // must not block the wallet-verify AJAX response (10s+ timeout per chain).
     add_action('bcc_wallet_verified', function (int $userId, string $chain, string $address): void {
+        wp_schedule_single_event(time(), 'bcc_onchain_seed_wallet', [$userId, $chain, $address]);
+    }, 10, 3);
+
+    add_action('bcc_onchain_seed_wallet', function (int $userId, string $chain, string $address): void {
         try {
             WalletSeedService::onWalletVerified($userId, $chain, $address);
         } catch (\Throwable $e) {
-            // Seed failures must not block the verify response or other listeners.
-            // Data will be populated on the next daily cron refresh.
             if (class_exists('BCC\\Core\\Log\\Logger')) {
                 \BCC\Core\Log\Logger::warning('[bcc-onchain] wallet seed failed, will retry on cron', [
                     'user_id' => $userId, 'chain' => $chain, 'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }, 10, 3);
+
+    // ── Wallet disconnect: revoke claims + recalc bonus ───────────────────
+    add_action('bcc_wallet_disconnected', function (int $userId, string $chainSlug, string $walletAddress): void {
+        try {
+            // Remove all claims tied to this wallet address.
+            $deleted = \BCC\Onchain\Repositories\ClaimRepository::deleteByUserAndWallet($userId, $walletAddress);
+
+            // Recalculate the on-chain bonus with the claims removed.
+            // Must include BOTH signal scores AND remaining claim bonuses
+            // (from other wallets the user still has connected).
+            $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
+            if ($pageId) {
+                $signalBonus = array_sum(array_column(
+                    \BCC\Onchain\Repositories\SignalRepository::get_for_page($pageId),
+                    'score_contribution'
+                ));
+                $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
+                $claimBonus  = \BCC\Onchain\Repositories\ClaimRepository::computePageClaimBonus(
+                    $walletTable,
+                    $pageId,
+                    $userId
+                );
+                $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+                BonusService::applyBonus($pageId, $totalBonus);
+            }
+
+            if ($deleted && class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::info('[bcc-onchain] claims revoked on wallet disconnect', [
+                    'user_id' => $userId, 'wallet' => $walletAddress, 'claims_deleted' => $deleted,
+                ]);
+            }
+        } catch (\Throwable $e) {
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::warning('[bcc-onchain] claim revocation failed on disconnect', [
+                    'user_id' => $userId, 'error' => $e->getMessage(),
                 ]);
             }
         }
@@ -203,13 +227,16 @@ add_action('plugins_loaded', function (): void {
     add_action('rest_api_init', [SignalController::class, 'registerRoutes']);
     add_action('rest_api_init', [CollectionController::class, 'registerRoutes']);
 
-    // ── Database migrations ─────────────────────────────────────────────────
-    add_action('admin_init', [MigrationService::class, 'maybeUpgrade']);
-
     // ── Manual cron triggers (admin only) ───────────────────────────────────
     add_action('admin_init', function () {
         if (!current_user_can('manage_options')) {
             return;
+        }
+
+        // Require nonce for all admin trigger actions (CSRF protection)
+        if (!empty($_GET['bcc_run_index_validators']) || !empty($_GET['bcc_run_index_collections'])
+            || !empty($_GET['bcc_run_enrich_validators']) || !empty($_GET['bcc_run_index_all'])) {
+            check_admin_referer('bcc_onchain_admin_trigger');
         }
 
         $ran = [];
@@ -256,9 +283,6 @@ add_action('plugins_loaded', function (): void {
         ChainsPage::register_page();
     }, 20);
     ChainsPage::register_ajax();
-    add_action('admin_init', function () {
-        SettingsPage::register_settings();
-    });
     add_action('admin_enqueue_scripts', function ($hook) {
         if (strpos($hook, 'bcc-onchain') !== false) {
             wp_enqueue_script('bcc-onchain-admin', BCC_ONCHAIN_URL . 'assets/js/bcc-onchain-admin.js', [], BCC_ONCHAIN_VERSION, true);
@@ -286,7 +310,7 @@ add_action('plugins_loaded', function (): void {
 
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SCHEMA HELPER (called from activation + migration — must remain global)
+// SCHEMA HELPER (called from activation — must remain global)
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**

@@ -48,7 +48,8 @@ function bcc_onchain_create_wallet_links_table(): void {
         KEY chain_id (chain_id),
         KEY wallet_address (wallet_address),
         KEY wallet_type (wallet_type),
-        UNIQUE KEY user_chain_wallet (user_id, chain_id, wallet_address)
+        UNIQUE KEY user_chain_wallet (user_id, chain_id, wallet_address),
+        UNIQUE KEY uq_chain_address (chain_id, wallet_address)
     ) {$charset_collate};";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';

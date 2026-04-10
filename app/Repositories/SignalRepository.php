@@ -54,8 +54,6 @@ class SignalRepository
 
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta($sql);
-
-        update_option('bcc_onchain_db_version', BCC_ONCHAIN_VERSION);
     }
 
     public static function upsert(array $data): void

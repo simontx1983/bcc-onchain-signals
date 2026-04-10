@@ -89,15 +89,13 @@ final class BonusService
             return;
         }
 
-        // Recompute full bonus: signal scores + all claim bonuses.
+        // Recompute full bonus: signal scores + ALL claim bonuses (validators + collections).
         $signalBonus = array_sum(array_column(
             SignalRepository::get_for_page($pageId),
             'score_contribution'
         ));
 
         $totalClaimBonus = ClaimRepository::computePageClaimBonus(
-            $entityType,
-            $entityTable,
             $walletTable,
             $pageId,
             $userId
