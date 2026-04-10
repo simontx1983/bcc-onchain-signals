@@ -36,7 +36,7 @@ final class WalletRepository
 
         $userId  = (int) $data['user_id'];
         $postId  = (int) $data['post_id'];
-        $address = sanitize_text_field($data['wallet_address']);
+        $address = strtolower(sanitize_text_field($data['wallet_address']));
         $chainId = (int) $data['chain_id'];
         $type    = sanitize_text_field($data['wallet_type'] ?? 'user');
         $label   = isset($data['label']) ? sanitize_text_field($data['label']) : '';
@@ -281,9 +281,10 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
+        $walletAddress = strtolower($walletAddress);
 
         return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(1) FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s",
+            "SELECT COUNT(1) FROM {$table} WHERE user_id = %d AND chain_id = %d AND LOWER(wallet_address) = %s",
             $userId, $chainId, $walletAddress
         ));
     }
@@ -295,9 +296,10 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
+        $walletAddress = strtolower($walletAddress);
 
         return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND wallet_address = %s",
+            "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND LOWER(wallet_address) = %s",
             $userId, $chainId, $walletAddress
         ));
     }
