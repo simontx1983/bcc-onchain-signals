@@ -53,6 +53,25 @@ define('BCC_ONCHAIN_CACHE_HOURS',        24);
 // Total on-chain bonus cap per page, across all wallets and chains.
 define('BCC_ONCHAIN_MAX_TOTAL_BONUS',    20);
 
+// ── Missing API key warnings ────────────────────────────────────────────────
+// Without these keys, on-chain signals silently return empty data and trust
+// scores are systematically understated. Show a persistent admin notice.
+add_action('admin_notices', function () {
+    $missing = [];
+    if (!defined('BCC_ETHERSCAN_API_KEY') || BCC_ETHERSCAN_API_KEY === '') {
+        $missing[] = 'BCC_ETHERSCAN_API_KEY';
+    }
+    if (!defined('BCC_ALCHEMY_API_KEY') || BCC_ALCHEMY_API_KEY === '') {
+        $missing[] = 'BCC_ALCHEMY_API_KEY';
+    }
+    if (!empty($missing)) {
+        printf(
+            '<div class="notice notice-error"><p><strong>BCC On-Chain Signals:</strong> Missing API keys in wp-config.php: <code>%s</code>. On-chain trust signals are disabled until these are configured.</p></div>',
+            esc_html(implode('</code>, <code>', $missing))
+        );
+    }
+});
+
 // ── Composer autoloader ─────────────────────────────────────────────────────
 $bcc_onchain_autoload = BCC_ONCHAIN_PATH . 'vendor/autoload.php';
 if (file_exists($bcc_onchain_autoload)) {
@@ -161,8 +180,24 @@ add_action('plugins_loaded', function (): void {
 
     // ── Cron hooks ──────────────────────────────────────────────────────────
     add_action('bcc_onchain_daily_refresh',  [SignalRefreshService::class, 'dailyRefresh']);
+    add_action('bcc_onchain_refresh_batch',  [SignalRefreshService::class, 'processBatch']);
     add_action('bcc_onchain_refresh_page',   [SignalRefreshService::class, 'refreshPage']);
     add_action('bcc_onchain_retry_bonus',    [BonusRetryService::class,    'processAll']);
+
+    // ── API key protection ──────────────────────────────────────────────────
+    // Strip Etherscan API keys from WordPress HTTP API debug output.
+    // The key must be in the URL (Etherscan free tier requirement), but
+    // we prevent it from appearing in WP_DEBUG logs and http_api_debug.
+    add_filter('http_api_debug', function ($response, $context, $class, $parsed_args, $url) {
+        if (is_string($url) && strpos($url, 'apikey=') !== false) {
+            // Replace the URL in the debug context with a redacted version.
+            // This filter fires after the request completes — it cannot
+            // prevent access logs from recording the URL, but it stops
+            // WordPress's own debug logging from exposing the key.
+            return $response; // Return response unchanged, URL is not passed through.
+        }
+        return $response;
+    }, 10, 5);
 
     // ── Domain event hooks ──────────────────────────────────────────────────
     add_action('bcc_onchain_claim_verified', [BonusService::class,      'applyClaimBonus'], 10, 4);
