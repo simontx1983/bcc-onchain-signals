@@ -43,6 +43,8 @@ class ThorchainFetcher implements FetcherInterface
 
     /**
      * Fetch a single node by address.
+     *
+     * @return array<string, mixed>
      */
     public function fetch_validator(string $address): array
     {
@@ -56,6 +58,8 @@ class ThorchainFetcher implements FetcherInterface
 
     /**
      * Fetch all active and standby nodes.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_all_validators(): array
     {
@@ -86,6 +90,8 @@ class ThorchainFetcher implements FetcherInterface
     /**
      * Enrich a single node. THORChain returns all data in one call,
      * so this just re-fetches the node — no separate enrichment needed.
+     *
+     * @return array<string, mixed>
      */
     public function enrich_validator(string $address, ?object $existingRow = null): array
     {
@@ -94,12 +100,15 @@ class ThorchainFetcher implements FetcherInterface
 
     /**
      * Not supported — THORChain doesn't have NFT collections.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         return [];
     }
 
+    /** @return array<int, array<string, mixed>> */
     public function fetch_top_collections(int $limit = 100): array
     {
         return [];
@@ -109,6 +118,9 @@ class ThorchainFetcher implements FetcherInterface
 
     /**
      * Map a THORChain node response to the standard validator schema.
+     *
+     * @param array<string, mixed> $node
+     * @return array<string, mixed>
      */
     private function mapNode(array $node, int $rank): array
     {
@@ -176,6 +188,8 @@ class ThorchainFetcher implements FetcherInterface
 
     /**
      * Make an HTTP GET request to the THORNode API.
+     *
+     * @return array<string, mixed>|null
      */
     private function apiGet(string $path): ?array
     {

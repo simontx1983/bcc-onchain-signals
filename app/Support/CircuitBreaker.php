@@ -103,6 +103,7 @@ final class CircuitBreaker
     /**
      * Get circuit breaker status for all active chains (admin dashboard).
      *
+     * @param int[] $chainIds
      * @return array<int, array{failures: int, opened_at: int, status: string}>
      */
     public static function getAllStatus(array $chainIds): array
@@ -131,6 +132,7 @@ final class CircuitBreaker
 
     // ── Storage ─────────────────────────────────────────────────────────────
 
+    /** @return array{failures: int, opened_at: int}|null */
     private static function getState(int $chainId): ?array
     {
         $key   = 'cb_' . $chainId;
@@ -147,6 +149,7 @@ final class CircuitBreaker
         return is_array($value) ? $value : null;
     }
 
+    /** @param array{failures: int, opened_at: int} $state */
     private static function setState(int $chainId, array $state): void
     {
         $key = 'cb_' . $chainId;

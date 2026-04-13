@@ -24,7 +24,7 @@ interface FetcherInterface
      * Fetch validator data for a given operator/wallet address.
      *
      * @param string $address Validator operator address or wallet address.
-     * @return array Array of validator data rows.
+     * @return array<string, mixed> Validator data row (empty if not found).
      */
     public function fetch_validator(string $address): array;
 
@@ -33,7 +33,7 @@ interface FetcherInterface
      *
      * @param string $walletAddress Creator wallet address.
      * @param int    $chainId       Chain ID (FK to bcc_chains.id). 0 = use fetcher's chain.
-     * @return array Array of normalized collection data rows.
+     * @return array<int, array<string, mixed>> Array of normalized collection data rows.
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array;
 
@@ -42,7 +42,7 @@ interface FetcherInterface
      * Not all chains support this — check supports_feature('top_collections') first.
      *
      * @param int $limit Max collections to return.
-     * @return array[] Normalized collection rows matching bulkUpsert() shape.
+     * @return array<int, array<string, mixed>> Normalized collection rows matching bulkUpsert() shape.
      */
     public function fetch_top_collections(int $limit = 100): array;
 

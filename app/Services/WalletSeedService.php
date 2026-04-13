@@ -52,24 +52,17 @@ final class WalletSeedService
 
     /**
      * Fetch and store signal data for a newly verified wallet.
+     *
+     * Delegates to SignalRefreshService to avoid duplicating the
+     * fetch -> score -> upsert pipeline. When no page exists yet
+     * (pageId = 0), the refresh service stores the signal row but
+     * skips bonus recalculation.
      */
     private static function seedSignals(int $userId, string $chain, string $address): void
     {
         $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
 
-        if ($pageId) {
-            SignalRefreshService::fetchAndStoreWallet($userId, $pageId, $chain, $address);
-        } else {
-            $signals = SignalFetcher::fetch($address, $chain);
-            if ($signals !== null) {
-                SignalRepository::upsert(array_merge($signals, [
-                    'user_id'            => $userId,
-                    'wallet_address'     => $address,
-                    'chain'              => $chain,
-                    'score_contribution' => min(SignalScorer::score($signals), BCC_ONCHAIN_MAX_TOTAL_BONUS),
-                ]));
-            }
-        }
+        SignalRefreshService::fetchAndStoreWallet($userId, $pageId, $chain, $address);
     }
 
     /**

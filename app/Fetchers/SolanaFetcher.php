@@ -24,7 +24,7 @@ class SolanaFetcher implements FetcherInterface
     private object $chain;
     private string $rpc_url;
 
-    /** @var array Cached vote accounts keyed by RPC URL (per PHP process). */
+    /** @var array<string, array<int, array<string, mixed>>> Cached vote accounts keyed by RPC URL (per PHP process). */
     private static array $voteAccountsCache = [];
 
     public function __construct(object $chain)
@@ -49,6 +49,8 @@ class SolanaFetcher implements FetcherInterface
 
     /**
      * Fetch a single validator by identity pubkey.
+     *
+     * @return array<string, mixed>
      */
     public function fetch_validator(string $address): array
     {
@@ -65,6 +67,8 @@ class SolanaFetcher implements FetcherInterface
 
     /**
      * Fetch all active validators sorted by stake descending.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_all_validators(): array
     {
@@ -90,6 +94,8 @@ class SolanaFetcher implements FetcherInterface
     /**
      * Enrich a validator. All data comes in one getVoteAccounts call,
      * so this just re-fetches from the cached set.
+     *
+     * @return array<string, mixed>
      */
     public function enrich_validator(string $address, ?object $existingRow = null): array
     {
@@ -102,6 +108,8 @@ class SolanaFetcher implements FetcherInterface
 
     /**
      * Fetch NFT collections associated with a Solana wallet.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
@@ -198,7 +206,7 @@ class SolanaFetcher implements FetcherInterface
      * Free endpoint, no API key required.
      *
      * @param int $limit Max collections to return (max 100).
-     * @return array[] Normalized collection rows for bulkUpsert().
+     * @return array<int, array<string, mixed>> Normalized collection rows for bulkUpsert().
      */
     public function fetch_top_collections(int $limit = 100): array
     {
@@ -273,6 +281,8 @@ class SolanaFetcher implements FetcherInterface
 
     /**
      * Get all vote accounts (cached per PHP process).
+     *
+     * @return array<int, array<string, mixed>>
      */
     private function getVoteAccounts(): array
     {
@@ -304,6 +314,9 @@ class SolanaFetcher implements FetcherInterface
 
     /**
      * Map a Solana vote account to the standard validator schema.
+     *
+     * @param array<string, mixed> $v
+     * @return array<string, mixed>
      */
     private function mapValidator(array $v, int $rank): array
     {
@@ -345,6 +358,9 @@ class SolanaFetcher implements FetcherInterface
 
     /**
      * Make a JSON-RPC call to the Solana RPC endpoint.
+     *
+     * @param array<string, mixed> $params
+     * @return array<string, mixed>|null
      */
     private function rpcCall(string $method, array $params): ?array
     {

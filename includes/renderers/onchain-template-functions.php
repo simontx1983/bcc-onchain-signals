@@ -152,7 +152,7 @@ function bcc_render_onchain_cards(array $items, int $total, array $options = [])
  * Default card renderer (fallback).
  */
 function bcc_render_default_card(object $item, string $type): void {
-    echo '<pre>' . esc_html(print_r($item, true)) . '</pre>';
+    echo '<div class="bcc-onchain-card--default"><em>' . esc_html(ucfirst($type)) . ' data available</em></div>';
 }
 
 // ── Type-Specific Card Renderers ─────────────────────────────────────────────
@@ -217,7 +217,7 @@ function bcc_render_validator_chain_card(object $item): void {
     </div>
 
     <div class="bcc-validator-card__footer">
-        <a href="<?php echo $explorer_link; ?>" target="_blank" rel="noopener" class="bcc-validator-card__explorer">
+        <a href="<?php echo esc_url($explorer_link); ?>" target="_blank" rel="noopener" class="bcc-validator-card__explorer">
             <?php echo esc_html($short_addr); ?> &#x2197;
         </a>
     </div>
@@ -318,7 +318,7 @@ function bcc_render_collection_card(object $item): void {
     </div>
 
     <div class="bcc-collection-card__footer">
-        <a href="<?php echo $explorer_link; ?>" target="_blank" rel="noopener" class="bcc-collection-card__explorer">
+        <a href="<?php echo esc_url($explorer_link); ?>" target="_blank" rel="noopener" class="bcc-collection-card__explorer">
             <?php echo esc_html($short_addr); ?> &#x2197;
         </a>
         <?php if ($can_toggle) : ?>

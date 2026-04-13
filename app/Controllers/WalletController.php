@@ -37,8 +37,8 @@ class WalletController
         add_action('wp_ajax_bcc_wallet_set_primary',  [__CLASS__, 'ajax_set_primary']);
         add_action('wp_ajax_bcc_wallet_list',         [__CLASS__, 'ajax_list']);
         add_action('wp_ajax_bcc_collection_toggle_profile', [__CLASS__, 'ajax_toggle_collection_profile']);
-        add_action('wp_ajax_bcc_claim_entity', [__CLASS__, 'ajax_claim_entity']);
-        add_action('wp_ajax_bcc_claim_status', [__CLASS__, 'ajax_claim_status']);
+        // Legacy AJAX claim handlers deleted — replaced by REST endpoint
+        // POST /bcc/v1/claim (EntityClaimEndpoint in bcc-trust-engine).
 
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
         add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_assets']);
@@ -70,6 +70,12 @@ class WalletController
         $chain_id = ChainRepository::resolveId($chain_slug);
         if (!$chain_id) {
             wp_send_json_error(['message' => 'Unsupported chain.'], 400);
+        }
+
+        // Validate wallet address format against the chain type before generating a challenge.
+        $chain = ChainRepository::getById($chain_id);
+        if ($chain && !self::validateAddressFormat($wallet_address, $chain->chain_type ?? '')) {
+            wp_send_json_error(['message' => 'Invalid wallet address format.'], 400);
         }
 
         $challenge = WalletIdentityService::generateChallenge(
@@ -296,12 +302,20 @@ class WalletController
 
     public static function rest_list_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
+        if (!\BCC\Core\Security\Throttle::allow('list_wallets', 30, 60)) {
+            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+        }
+
         $wallets = WalletRepository::getForUser(get_current_user_id());
         return rest_ensure_response(array_map([self::class, 'projectWalletFields'], $wallets));
     }
 
     public static function rest_project_wallets(\WP_REST_Request $req): \WP_REST_Response
     {
+        if (!\BCC\Core\Security\Throttle::allow('project_wallets', 30, 60)) {
+            return new \WP_REST_Response(['message' => 'Too many requests.'], 429);
+        }
+
         $post_id = (int) $req->get_param('post_id');
         $wallets = WalletRepository::getForProject($post_id);
 
@@ -325,6 +339,8 @@ class WalletController
 
     /**
      * Strip internal IDs (user_id, chain_id, post_id) from wallet REST responses.
+     *
+     * @return array<string, mixed>
      */
     private static function projectWalletFields(object $w): array
     {
@@ -437,99 +453,12 @@ class WalletController
         wp_send_json_success(['collection_id' => $collection_id, 'show_on_profile' => $show]);
     }
 
-    // ── Claim AJAX ──────────────────────────────────────────────────────────
-
-    /**
-     * AJAX: Claim an on-chain entity (validator/collection).
-     * Verifies user's connected wallet matches the entity's on-chain owner.
-     */
-    public static function ajax_claim_entity(): void
-    {
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        $user_id     = get_current_user_id();
-        if (!$user_id) {
-            wp_send_json_error(['message' => 'Authentication required.'], 401);
-        }
-
-        // Rate limit: 10 requests per minute per user (atomic).
-        if (!\BCC\Core\Security\Throttle::allow('claim_entity', 10, 60)) {
-            wp_send_json_error(['message' => 'Too many requests. Please wait.'], 429);
-        }
-
-        $entity_type = sanitize_key($_POST['entity_type'] ?? '');
-        $entity_id   = (int) ($_POST['entity_id'] ?? 0);
-
-        if (!$entity_type || !$entity_id) {
-            wp_send_json_error(['message' => 'Missing entity type or ID.'], 400);
-        }
-
-        $result = \BCC\Onchain\Services\ClaimService::claim($user_id, $entity_type, $entity_id);
-
-        if ($result['success']) {
-            Logger::audit('entity_claimed', ['user_id' => $user_id, 'type' => $entity_type, 'id' => $entity_id]);
-            wp_send_json_success($result);
-        } else {
-            $code = !empty($result['needs_wallet']) ? 412 : 400;
-            wp_send_json_error($result, $code);
-        }
-    }
-
-    /**
-     * AJAX: Check claim status for an entity (used by block to show badges).
-     */
-    public static function ajax_claim_status(): void
-    {
-        check_ajax_referer('bcc_wallet_nonce', 'nonce');
-
-        if (!is_user_logged_in()) {
-            wp_send_json_error(['message' => 'Authentication required.'], 401);
-        }
-
-        if (!\BCC\Core\Security\Throttle::allow('claim_status', 20, 60)) {
-            wp_send_json_error(['message' => 'Too many requests.'], 429);
-        }
-
-        $entity_type = sanitize_key($_POST['entity_type'] ?? '');
-        $entity_id   = (int) ($_POST['entity_id'] ?? 0);
-
-        if (!$entity_type || !$entity_id) {
-            wp_send_json_error(['message' => 'Missing parameters.'], 400);
-        }
-
-        // Single query — getForEntity() returns all verified claims with user names.
-        // Extract the current user's claim from the same result set instead of a second query.
-        $claims  = \BCC\Onchain\Repositories\ClaimRepository::getForEntity($entity_type, $entity_id);
-        $user_id = get_current_user_id();
-
-        $user_claim = null;
-        if ($user_id) {
-            foreach ($claims as $c) {
-                if ((int) $c->user_id === $user_id) {
-                    $user_claim = $c;
-                    break;
-                }
-            }
-        }
-
-        wp_send_json_success([
-            'claims'     => array_map(function ($c) {
-                return [
-                    'claimer_name' => $c->claimer_name ?? '',
-                    'role'         => $c->claim_role,
-                    'verified_at'  => $c->verified_at,
-                ];
-            }, $claims),
-            'user_claim' => $user_claim ? [
-                'id'     => (int) $user_claim->id,
-                'role'   => $user_claim->claim_role,
-                'status' => $user_claim->status,
-            ] : null,
-        ]);
-    }
+    // Legacy AJAX claim handlers (ajax_claim_entity, ajax_claim_status) deleted.
+    // Replaced by REST endpoint POST /bcc/v1/claim (EntityClaimEndpoint in bcc-trust-engine).
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /** @return array<int, array<string, mixed>> */
     private static function getChainsForJs(): array
     {
         $chains = ChainRepository::getActive();
@@ -549,5 +478,18 @@ class WalletController
         }
 
         return $result;
+    }
+
+    /**
+     * Validate wallet address format against the chain type.
+     */
+    private static function validateAddressFormat(string $address, string $chainType): bool
+    {
+        return match ($chainType) {
+            'evm'    => (bool) preg_match('/^0x[a-fA-F0-9]{40}$/', $address),
+            'solana' => (bool) preg_match('/^[1-9A-HJ-NP-Za-km-z]{32,44}$/', $address),
+            'cosmos' => (bool) preg_match('/^[a-z]{1,20}1[a-z0-9]{38,58}$/', $address),
+            default  => strlen($address) >= 10 && strlen($address) <= 128,
+        };
     }
 }

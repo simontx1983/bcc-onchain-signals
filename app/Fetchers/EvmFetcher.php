@@ -39,6 +39,7 @@ class EvmFetcher implements FetcherInterface
         return in_array($feature, ['collection', 'top_collections'], true);
     }
 
+    /** @return array<string, mixed> */
     public function fetch_validator(string $address): array
     {
         return []; // EVM chains don't expose validator data via Etherscan API
@@ -53,7 +54,7 @@ class EvmFetcher implements FetcherInterface
      *
      * @param string $walletAddress  Wallet address to query.
      * @param int    $chainId        Chain ID override (ignored — uses $this->chain->id).
-     * @return array[] Array of normalized collection rows.
+     * @return array<int, array<string, mixed>> Array of normalized collection rows.
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
@@ -127,7 +128,7 @@ class EvmFetcher implements FetcherInterface
                 'collection_name'    => $meta['collection_name'],
                 'chain_id'           => $chainId,
                 'token_standard'     => $meta['token_standard'],
-                'total_supply'       => $meta['mint_count'] > 0 ? $meta['mint_count'] : null,
+                'total_supply'       => $meta['mint_count'],
                 'floor_price'        => null,
                 'floor_currency'     => $native,
                 'total_volume'       => null,
@@ -151,7 +152,7 @@ class EvmFetcher implements FetcherInterface
      * holders, supply, image.
      *
      * @param int $limit Number of top collections to fetch (max 100 per call).
-     * @return array[] Array of normalized collection data rows.
+     * @return array<int, array<string, mixed>> Array of normalized collection data rows.
      */
     public function fetch_top_collections(int $limit = 100): array
     {
@@ -277,6 +278,10 @@ class EvmFetcher implements FetcherInterface
         return 'https://api.' . $host . '/api';
     }
 
+    /**
+     * @param array<string, mixed> $params
+     * @return object[]|null
+     */
     private function etherscanGet(string $apiBase, array $params): ?array
     {
         $url      = add_query_arg($params, $apiBase);

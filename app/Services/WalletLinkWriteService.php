@@ -57,13 +57,7 @@ final class WalletLinkWriteService implements WalletLinkWriteInterface
             WalletRepository::verify($walletLinkId);
 
             // Auto-set primary if first wallet on this chain for this user
-            $existing = WalletRepository::getForUser($userId);
-            $chainCount = 0;
-            foreach ($existing as $w) {
-                if ((int) $w->chain_id === $chainId) {
-                    $chainCount++;
-                }
-            }
+            $chainCount = WalletRepository::countForUserByChain($userId, $chainId);
             if ($chainCount <= 1) {
                 WalletRepository::setPrimary($walletLinkId, $userId);
             }

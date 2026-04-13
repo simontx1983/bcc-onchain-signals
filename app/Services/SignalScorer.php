@@ -17,11 +17,31 @@ if (!defined('ABSPATH')) {
  */
 class SignalScorer
 {
+    /** @param array<string, mixed> $signals */
     public static function score(array $signals): float
     {
         return self::breakdown($signals)['total'];
     }
 
+    /**
+     * Maximum plausible values for on-chain signal data.
+     *
+     * These bounds catch MITM-injected or corrupted API responses.
+     * Ethereum mainnet launched 2015-07-30 (~4000 days as of 2026).
+     * Solana launched 2020-03-16 (~2200 days). We use generous upper
+     * bounds that cover all supported chains.
+     */
+    private const PLAUSIBILITY_BOUNDS = [
+        'wallet_age_days'    => 5000,    // ~13.7 years — no blockchain is older
+        'tx_count'           => 5000000, // 5M transactions — implausible for a single wallet
+        'contract_count'     => 50000,   // 50k contracts — implausible for a single deployer
+        'contract_age_days'  => 5000,    // same as wallet age
+    ];
+
+    /**
+     * @param array<string, mixed> $signals
+     * @return array{age_days: int, tx_count: int, contract_count: int, contract_age_days: int|null, age_score: float, depth_score: float, contract_score: float, total: float, max_possible: float|int}
+     */
     public static function breakdown(array $signals): array
     {
         $age_days          = (int)   ($signals['wallet_age_days']    ?? 0);
@@ -30,6 +50,36 @@ class SignalScorer
         $contract_age_days = isset($signals['contract_age_days'])
                              ? (int) $signals['contract_age_days']
                              : null;
+
+        // ── Plausibility enforcement ─────────────────────────────────
+        // Clamp to reasonable maximums. Any value above these bounds
+        // indicates corrupted data, API spoofing, or a bug. Log and
+        // cap rather than reject — the scorer should be tolerant of
+        // edge cases but not pass through impossible values.
+        $anomaly = false;
+        if ($age_days < 0 || $age_days > self::PLAUSIBILITY_BOUNDS['wallet_age_days']) {
+            $age_days = min(max(0, $age_days), self::PLAUSIBILITY_BOUNDS['wallet_age_days']);
+            $anomaly = true;
+        }
+        if ($tx_count < 0 || $tx_count > self::PLAUSIBILITY_BOUNDS['tx_count']) {
+            $tx_count = min(max(0, $tx_count), self::PLAUSIBILITY_BOUNDS['tx_count']);
+            $anomaly = true;
+        }
+        if ($contract_count < 0 || $contract_count > self::PLAUSIBILITY_BOUNDS['contract_count']) {
+            $contract_count = min(max(0, $contract_count), self::PLAUSIBILITY_BOUNDS['contract_count']);
+            $anomaly = true;
+        }
+        if ($contract_age_days !== null && ($contract_age_days < 0 || $contract_age_days > self::PLAUSIBILITY_BOUNDS['contract_age_days'])) {
+            $contract_age_days = min(max(0, $contract_age_days), self::PLAUSIBILITY_BOUNDS['contract_age_days']);
+            $anomaly = true;
+        }
+
+        if ($anomaly) {
+            \BCC\Core\Log\Logger::error('[SignalScorer] Implausible signal data clamped', [
+                'original' => $signals,
+                'clamped'  => compact('age_days', 'tx_count', 'contract_count', 'contract_age_days'),
+            ]);
+        }
 
         $age_score      = self::ageScore($age_days);
         $depth_score    = self::depthScore($tx_count);

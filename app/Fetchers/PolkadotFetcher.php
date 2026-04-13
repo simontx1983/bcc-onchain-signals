@@ -41,6 +41,8 @@ class PolkadotFetcher implements FetcherInterface
 
     /**
      * Fetch a single validator by stash address.
+     *
+     * @return array<string, mixed>
      */
     public function fetch_validator(string $address): array
     {
@@ -57,6 +59,8 @@ class PolkadotFetcher implements FetcherInterface
 
     /**
      * Fetch all active validators sorted by stake.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_all_validators(): array
     {
@@ -117,6 +121,8 @@ class PolkadotFetcher implements FetcherInterface
 
     /**
      * Enrich a validator. Subscan returns full data in one call.
+     *
+     * @return array<string, mixed>
      */
     public function enrich_validator(string $address, ?object $existingRow = null): array
     {
@@ -125,12 +131,15 @@ class PolkadotFetcher implements FetcherInterface
 
     /**
      * Not supported — Polkadot doesn't have NFT collections in this fetcher.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         return [];
     }
 
+    /** @return array<int, array<string, mixed>> */
     public function fetch_top_collections(int $limit = 100): array
     {
         return [];
@@ -140,6 +149,9 @@ class PolkadotFetcher implements FetcherInterface
 
     /**
      * Map a Subscan validator response to the standard schema.
+     *
+     * @param array<string, mixed> $v
+     * @return array<string, mixed>
      */
     private function mapValidator(array $v, int $rank): array
     {
@@ -202,6 +214,9 @@ class PolkadotFetcher implements FetcherInterface
     /**
      * Make a POST request to the Subscan API.
      * Requires BCC_SUBSCAN_API_KEY defined in wp-config.php.
+     *
+     * @param array<string, mixed> $body
+     * @return array<string, mixed>|null
      */
     private function apiPost(string $path, array $body): ?array
     {

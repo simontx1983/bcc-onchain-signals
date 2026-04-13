@@ -19,7 +19,8 @@ final class BonusRetryService
 {
     private const OPTION_KEY    = 'bcc_onchain_pending_bonus';
     private const LOCK_KEY      = 'bcc_bonus_retry';
-    private const MAX_ATTEMPTS  = 5;
+    private const MAX_ATTEMPTS       = 20;
+    private const QUARANTINE_KEY     = 'bcc_onchain_quarantined_bonus';
 
     /**
      * Queue a failed bonus application for retry.
@@ -33,6 +34,7 @@ final class BonusRetryService
         }
 
         try {
+            /** @var array<int, array{bonus: float, queued_at: int, attempts: int}> $pending */
             $pending = get_option(self::OPTION_KEY, []);
             $pending[$pageId] = [
                 'bonus'     => $bonus,
@@ -131,11 +133,14 @@ final class BonusRetryService
         foreach ($pending as $pageId => $entry) {
             if (($entry['attempts'] ?? 0) >= self::MAX_ATTEMPTS) {
                 if (class_exists('BCC\\Core\\Log\\Logger')) {
-                    \BCC\Core\Log\Logger::error('[bcc-onchain-signals] bonus_retry_exhausted', [
+                    \BCC\Core\Log\Logger::error('[bcc-onchain-signals] bonus_retry_exhausted_quarantined', [
                         'page_id'  => $pageId,
                         'attempts' => $entry['attempts'],
                     ]);
                 }
+                // Quarantine instead of silently dropping. Admin can inspect
+                // and manually retry via wp_options → bcc_onchain_quarantined_bonus.
+                self::quarantine($pageId, $entry);
                 $exhausted[] = $pageId;
                 continue;
             }
@@ -167,7 +172,8 @@ final class BonusRetryService
         }
 
         // ── Step 3: write results back under lock ───────────────────────
-        if (!\BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+        $lockAcquired = \BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5);
+        if (!$lockAcquired) {
             return; // Could not re-acquire — results will be picked up next cycle.
         }
 
@@ -194,6 +200,58 @@ final class BonusRetryService
 
         } finally {
             \BCC\Onchain\Repositories\LockRepository::release(self::PROCESS_LOCK_KEY);
+        }
+    }
+
+    /**
+     * Move a permanently failed entry to a quarantine option instead of
+     * silently dropping it. Admins can inspect and manually retry via
+     * wp_options → bcc_onchain_quarantined_bonus.
+     *
+     * @param int                                          $pageId
+     * @param array{bonus: float, queued_at: int, attempts: int} $entry
+     */
+    private static function quarantine(int $pageId, array $entry): void
+    {
+        /** @var array<int, array{bonus: float, queued_at: int, attempts: int, quarantined_at: int}> $quarantined */
+        $quarantined = get_option(self::QUARANTINE_KEY, []);
+        $quarantined[$pageId] = [
+            'bonus'          => $entry['bonus'] ?? 0.0,
+            'queued_at'      => $entry['queued_at'] ?? 0,
+            'attempts'       => $entry['attempts'] ?? 0,
+            'quarantined_at' => time(),
+        ];
+        update_option(self::QUARANTINE_KEY, $quarantined, false);
+    }
+
+    /**
+     * Prune quarantine entries older than 14 days and cap at 100 rows.
+     *
+     * Call from a daily cron hook to prevent unbounded growth.
+     */
+    public static function pruneQuarantine(): void
+    {
+        /** @var array<int, array{bonus: float, queued_at: int, attempts: int, quarantined_at: int}> $quarantined */
+        $quarantined = get_option(self::QUARANTINE_KEY, []);
+
+        if (empty($quarantined)) {
+            return;
+        }
+
+        $cutoff  = time() - (14 * DAY_IN_SECONDS);
+        $pruned  = array_filter(
+            $quarantined,
+            static fn(array $entry): bool => ($entry['quarantined_at'] ?? 0) >= $cutoff
+        );
+
+        // Cap at 100 entries — keep the most recent by quarantined_at.
+        if (count($pruned) > 100) {
+            uasort($pruned, static fn(array $a, array $b): int => ($b['quarantined_at'] ?? 0) <=> ($a['quarantined_at'] ?? 0));
+            $pruned = array_slice($pruned, 0, 100, true);
+        }
+
+        if (count($pruned) !== count($quarantined)) {
+            update_option(self::QUARANTINE_KEY, $pruned, false);
         }
     }
 }

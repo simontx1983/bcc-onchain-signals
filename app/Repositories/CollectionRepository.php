@@ -24,7 +24,7 @@ final class CollectionRepository
     /**
      * Insert or update a collection row by wallet_link_id + chain_id + contract_address.
      *
-     * @param array $data       Normalized collection data from a fetcher.
+     * @param array<string, mixed> $data  Normalized collection data from a fetcher.
      * @param int   $walletLinkId  The wallet link this collection belongs to.
      * @param int   $ttlSeconds    Cache TTL before the row is considered expired.
      * @return int|false  Row ID on success, false on failure.
@@ -78,7 +78,7 @@ final class CollectionRepository
      * Bulk-upsert collections for a chain (no wallet_link_id required).
      * Used by the chain-level indexing cron. Matches on (chain_id, contract_address).
      *
-     * @param array[] $collections Normalized collection rows from fetch_top_collections().
+     * @param array<int, array<string, mixed>> $collections Normalized collection rows from fetch_top_collections().
      * @param int     $ttlSeconds  TTL for expires_at.
      * @return int Number of rows written.
      */
@@ -154,7 +154,7 @@ final class CollectionRepository
      * Each chain type is ranked independently — no cross-chain mixing.
      *
      * @param string $chainType One of: 'evm', 'solana', 'cosmos'.
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: object[], total: int, pages: int}
      */
     public static function getTopCollectionsByChainType(
         string $chainType,
@@ -210,7 +210,7 @@ final class CollectionRepository
     /**
      * @param bool $includeHidden If true, returns all collections regardless of show_on_profile.
      *                            Used by the page owner's dashboard. Public views pass false.
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: object[], total: int, pages: int}
      */
     public static function getForProject(int $postId, int $page = 1, int $perPage = 8, string $orderBy = 'total_volume', bool $includeHidden = false): array
     {
@@ -371,23 +371,32 @@ final class CollectionRepository
     }
 
     /**
-     * Exponential backoff: push expires_at forward by 2x the original TTL.
+     * Exponential backoff: push expires_at forward by 2x the original TTL,
+     * capped at 7 days to prevent collections from disappearing from
+     * refresh cycles indefinitely (uncapped would reach 170+ days after
+     * 10 failures).
      */
     public static function backoffRow(int $rowId): bool
     {
         global $wpdb;
-        $table = self::table();
+        $table   = self::table();
+        $maxSecs = 7 * DAY_IN_SECONDS; // 604800 seconds = 7 days cap
 
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
-             SET expires_at = DATE_ADD(NOW(), INTERVAL TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2 SECOND)
+             SET expires_at = DATE_ADD(NOW(), INTERVAL LEAST(
+                 TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2,
+                 %d
+             ) SECOND)
              WHERE id = %d",
+            $maxSecs,
             $rowId
         ));
 
         return $result !== false;
     }
 
+    /** @return object[] */
     public static function getExpired(int $limit = 50): array
     {
         global $wpdb;
@@ -422,6 +431,11 @@ final class CollectionRepository
      */
     public static function getCountsByChain(): array
     {
+        $cached = wp_cache_get('collection_counts_by_chain', 'bcc_onchain');
+        if (is_array($cached)) {
+            return $cached;
+        }
+
         global $wpdb;
         $table = self::table();
 
@@ -429,13 +443,16 @@ final class CollectionRepository
             "SELECT chain_id, COUNT(*) AS cnt,
                     MAX(fetched_at) AS last_fetched
              FROM {$table}
-             GROUP BY chain_id"
+             GROUP BY chain_id
+             LIMIT 100"
         );
 
         $map = [];
         foreach ($rows ?: [] as $row) {
             $map[(int) $row->chain_id] = $row;
         }
+
+        wp_cache_set('collection_counts_by_chain', $map, 'bcc_onchain', 3600);
 
         return $map;
     }

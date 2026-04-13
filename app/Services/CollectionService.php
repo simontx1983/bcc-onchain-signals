@@ -22,14 +22,12 @@ final class CollectionService
     /**
      * Get paginated collections for a project (shadow CPT post ID).
      *
-     * @param int    $projectId  Shadow CPT post_id (e.g. nft post).
-     * @param int    $page       Page number (1-based).
-     * @param int    $perPage    Items per page.
-     * @param string $orderBy    Column to sort by.
-     * @return array{items: array, total: int, pages: int}
-     */
-    /**
-     * @param bool $includeHidden If true, returns hidden collections too (for owner dashboard).
+     * @param int    $projectId    Shadow CPT post_id (e.g. nft post).
+     * @param int    $page         Page number (1-based).
+     * @param int    $perPage      Items per page.
+     * @param string $orderBy      Column to sort by.
+     * @param bool   $includeHidden If true, returns hidden collections too (for owner dashboard).
+     * @return array{items: object[], total: int, pages: int}
      */
     public static function getForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_volume', bool $includeHidden = false): array
     {
@@ -56,7 +54,7 @@ final class CollectionService
      * Only counts visible collections (show_on_profile = 1).
      *
      * @param int $projectId
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: object[], total: int, pages: int}
      */
     public static function getAllForProject(int $projectId): array
     {
@@ -81,10 +79,10 @@ final class CollectionService
      *   ->is_creator    bool  True if the page owner created/deployed this collection.
      *   ->viewer_holds  bool  True if the viewing user holds NFTs from this collection.
      *
-     * @param array  $items     Collection item objects (from getForProject).
-     * @param int    $ownerId   Page owner user ID (creator badge).
-     * @param int    $viewerId  Current viewer user ID (holder badge). 0 = logged out.
-     * @return array Same items with badge flags added.
+     * @param object[] $items     Collection item objects (from getForProject).
+     * @param int      $ownerId   Page owner user ID (creator badge).
+     * @param int      $viewerId  Current viewer user ID (holder badge). 0 = logged out.
+     * @return object[] Same items with badge flags added.
      */
     public static function enrichWithBadges(array $items, int $ownerId, int $viewerId = 0): array
     {
@@ -160,9 +158,9 @@ final class CollectionService
      *   ->collection_name, ->contract_address, ->data_source ('onchain'|'self-reported')
      *   On-chain items retain all DB columns. Self-reported items have ACF subfield values.
      *
-     * @param array $onchainItems  Items from CollectionService::getForProject() (objects).
-     * @param array $manualRows    ACF repeater rows (assoc arrays from get_field()).
-     * @return array Merged list of stdClass objects.
+     * @param object[] $onchainItems  Items from CollectionService::getForProject() (objects).
+     * @param array<int, array<string, mixed>> $manualRows    ACF repeater rows (assoc arrays from get_field()).
+     * @return object[] Merged list of stdClass objects.
      */
     public static function mergeWithManual(array $onchainItems, array $manualRows): array
     {

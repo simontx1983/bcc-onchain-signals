@@ -18,8 +18,10 @@ final class ChainRepository
     /** @var string Object-cache / transient group. */
     private const CACHE_GROUP = 'bcc_chains';
 
-    /** @var int Default TTL in seconds (1 hour). Filterable via bcc_chains_cache_ttl. */
-    private const DEFAULT_TTL = HOUR_IN_SECONDS;
+    /** @var int Default TTL in seconds (5 minutes). Filterable via bcc_chains_cache_ttl.
+     *  Reduced from 1 hour: if a chain is deactivated, the old 1-hour TTL allowed
+     *  wallet verifications on deactivated chains for up to 60 minutes. */
+    private const DEFAULT_TTL = 300;
 
     public static function table(): string
     {
@@ -57,6 +59,7 @@ final class ChainRepository
         ));
     }
 
+    /** @return object[] */
     public static function getActive(?string $chainType = null): array
     {
         $all = self::getAllCached();
@@ -84,6 +87,8 @@ final class ChainRepository
     /**
      * Return all active chains, served from object cache (per-request)
      * backed by a transient (cross-request, works without Redis).
+     *
+     * @return object[]
      */
     private static function getAllCached(): array
     {
@@ -106,7 +111,7 @@ final class ChainRepository
         $table = self::table();
 
         $rows = $wpdb->get_results(
-            "SELECT " . self::COLUMNS . " FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC"
+            "SELECT " . self::COLUMNS . " FROM {$table} WHERE is_active = 1 ORDER BY chain_type ASC, name ASC LIMIT 200"
         );
 
         $rows = is_array($rows) ? $rows : [];
@@ -129,7 +134,7 @@ final class ChainRepository
         $table = self::table();
 
         return $wpdb->get_results(
-            "SELECT " . self::COLUMNS . " FROM {$table} ORDER BY chain_type ASC, name ASC"
+            "SELECT " . self::COLUMNS . " FROM {$table} ORDER BY chain_type ASC, name ASC LIMIT 200"
         ) ?: [];
     }
 

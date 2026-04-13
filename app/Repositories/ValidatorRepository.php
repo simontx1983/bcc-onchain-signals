@@ -22,6 +22,7 @@ final class ValidatorRepository
     }
 
     /**
+     * @param array<string, mixed> $data
      * @return int|false Inserted/updated row ID, or false on failure.
      */
     public static function upsert(array $data, int $walletLinkId, int $ttlSeconds = 3600)
@@ -97,6 +98,7 @@ final class ValidatorRepository
      * Only updates columns that have non-null values in $data,
      * preserving existing data for fields the fetcher didn't return.
      */
+    /** @param array<string, mixed> $data */
     public static function enrichByOperator(array $data, int $ttlSeconds = HOUR_IN_SECONDS): bool
     {
         global $wpdb;
@@ -118,7 +120,7 @@ final class ValidatorRepository
         ];
 
         foreach ($enrichable as $col => $fmt) {
-            if (isset($data[$col]) && $data[$col] !== null) {
+            if (isset($data[$col])) {
                 $sets[]   = "{$col} = {$fmt}";
                 $params[] = $data[$col];
             }
@@ -146,14 +148,6 @@ final class ValidatorRepository
     }
 
     /**
-     * Bulk-upsert validators for a chain (no wallet_link_id required).
-     * Used by the chain-level indexing cron. Matches on (chain_id, operator_address).
-     *
-     * @param array[] $validators Array of validator data arrays from fetch_all_validators().
-     * @param int     $ttlSeconds TTL for expires_at.
-     * @return int Number of rows written.
-     */
-    /**
      * Bulk-upsert validators for a chain. Lean write strategy:
      *
      *   1. SELECT existing rows for this chain (1 query)
@@ -166,7 +160,7 @@ final class ValidatorRepository
      * Write budget at 500 validators, ~20 changed, ~80 stale fetched_at:
      *   20 individual UPDATEs + 1 batch UPDATE = 21 queries (down from 500).
      *
-     * @param array[] $validators Array of validator data arrays from fetch_all_validators().
+     * @param array<int, array<string, mixed>> $validators Array of validator data arrays from fetch_all_validators().
      * @param int     $ttlSeconds TTL for expires_at.
      * @return array{total: int, new: int, updated: int, unchanged: int, refreshed: int}
      */
@@ -332,7 +326,7 @@ final class ValidatorRepository
     }
 
     /**
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: object[], total: int, pages: int}
      */
     public static function getForProject(int $postId, int $page = 1, int $perPage = 8, string $orderBy = 'total_stake'): array
     {
@@ -382,15 +376,12 @@ final class ValidatorRepository
     /**
      * Get top validators globally (not per-project). Used by leaderboard block.
      *
-     * @return array{items: array, total: int, pages: int}
-     */
-    /**
      * @param int         $page
      * @param int         $perPage
      * @param string      $orderBy
      * @param int|null    $chainId    Filter by chain.
      * @param string|null $timeWindow Filter by fetched_at window: '1h','6h','12h','1d','7d','30d'. Null = all.
-     * @return array{items: array, total: int, pages: int}
+     * @return array{items: object[], total: int, pages: int}
      */
     public static function getTopValidators(int $page = 1, int $perPage = 20, string $orderBy = 'total_stake', ?int $chainId = null, ?string $timeWindow = null, ?string $direction = null): array
     {
@@ -445,9 +436,7 @@ final class ValidatorRepository
             ? (int) $wpdb->get_var($countSql)
             : (int) $wpdb->get_var($wpdb->prepare($countSql, ...$countParams));
 
-        $items = empty($mainParams)
-            ? $wpdb->get_results($mainSql)
-            : $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
+        $items = $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
 
         return [
             'items' => $items ?: [],
@@ -665,7 +654,8 @@ final class ValidatorRepository
             "SELECT chain_id, COUNT(*) AS cnt,
                     MAX(fetched_at) AS last_fetched
              FROM {$table}
-             GROUP BY chain_id"
+             GROUP BY chain_id
+             LIMIT 100"
         );
 
         $map = [];
@@ -679,17 +669,24 @@ final class ValidatorRepository
     }
 
     /**
-     * Exponential backoff: push expires_at forward by 2x the original TTL.
+     * Exponential backoff: push expires_at forward by 2x the original TTL,
+     * capped at 7 days to prevent validators from disappearing from
+     * refresh cycles indefinitely.
      */
     public static function backoffRow(int $rowId): bool
     {
         global $wpdb;
-        $table = self::table();
+        $table   = self::table();
+        $maxSecs = 7 * DAY_IN_SECONDS;
 
         $result = $wpdb->query($wpdb->prepare(
             "UPDATE {$table}
-             SET expires_at = DATE_ADD(NOW(), INTERVAL TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2 SECOND)
+             SET expires_at = DATE_ADD(NOW(), INTERVAL LEAST(
+                 TIMESTAMPDIFF(SECOND, fetched_at, expires_at) * 2,
+                 %d
+             ) SECOND)
              WHERE id = %d",
+            $maxSecs,
             $rowId
         ));
 

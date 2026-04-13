@@ -95,7 +95,7 @@ class ClaimRepository {
      * Pass $includeWalletAddress = true only when the caller needs it
      * (e.g. admin views).
      *
-     * @return array Array of claim objects with user display_name.
+     * @return object[] Array of claim objects with user display_name.
      */
     public static function getForEntity(string $entityType, int $entityId, bool $includeWalletAddress = false): array {
         global $wpdb;
@@ -110,7 +110,8 @@ class ClaimRepository {
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id = %d AND cl.status = 'verified'
-             ORDER BY cl.verified_at ASC",
+             ORDER BY cl.verified_at ASC
+             LIMIT 100",
             $entityType,
             $entityId
         ));

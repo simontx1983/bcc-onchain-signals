@@ -6,7 +6,7 @@
  *
  * Design principles:
  *  - DB is source of truth (next_enrichment_at, retry_after, enrichment_attempts)
- *  - Redis is used ONLY for atomic API budget counting and cron overlap lock
+ *  - MySQL advisory locks prevent cron overlap; wp_cache counters track API budget
  *  - Priority: linked validators > missing data > high stake > everything else
  *  - Exponential backoff on failure (15m → 1h → 6h → 24h cap)
  *  - Staggered scheduling prevents thundering herd
@@ -46,7 +46,7 @@ final class EnrichmentScheduler
     const BACKOFF_MAX     = 24 * HOUR_IN_SECONDS;      // 24h cap
     const MAX_ATTEMPTS    = 10;                        // Stop retrying after this
 
-    // ── Redis keys ──────────────────────────────────────────────────────────
+    // ── Lock / counter keys (MySQL advisory locks + wp_cache counters) ─────
     const LOCK_KEY        = 'bcc:enrichment_lock';
     const API_COUNTER_KEY = 'bcc:enrichment_api_calls';
     const CACHE_GROUP     = 'bcc_enrichment';
@@ -67,7 +67,7 @@ final class EnrichmentScheduler
             'stopped_reason' => 'batch_complete',
         ];
 
-        // ── Redis lock: prevent concurrent runs ─────────────────────────
+        // ── MySQL advisory lock: prevent concurrent runs ────────────────
         if (!self::acquireLock()) {
             $result['stopped_reason'] = 'locked';
             self::log('Scheduler skipped — another run is locked.');
@@ -216,6 +216,7 @@ final class EnrichmentScheduler
      *   - retry_after IS NULL OR retry_after <= NOW() (not in backoff)
      *   - enrichment_attempts < MAX_ATTEMPTS (not permanently failed)
      */
+    /** @return object[] */
     private static function fetchBatch(): array
     {
         return ValidatorRepository::fetchEnrichmentBatch(self::MAX_ATTEMPTS, self::MAX_VALIDATORS_PER_RUN);
@@ -332,7 +333,7 @@ final class EnrichmentScheduler
     }
 
     // =====================================================================
-    // REDIS: LOCK + API COUNTER (Section 5)
+    // LOCK + API COUNTER (Section 5)
     // =====================================================================
 
     /**
@@ -356,6 +357,7 @@ final class EnrichmentScheduler
      * static counters ensure budget enforcement within a single cron run.
      */
     private static int $staticGlobalCount = 0;
+    /** @var array<int, int> */
     private static array $staticChainCounts = [];
 
     /**

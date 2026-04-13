@@ -23,7 +23,7 @@ final class SignalRefreshService
      * Fetch (or load from cache) on-chain signals for all wallets connected
      * to the owner of $pageId, store them, and return the rows.
      *
-     * @return array Array of signal rows.
+     * @return array<int, array<string, mixed>> Array of signal rows.
      */
     public static function fetchAndStoreForPage(int $pageId, bool $force = false): array
     {
@@ -74,7 +74,7 @@ final class SignalRefreshService
     /**
      * Fetch and store signals for a single wallet, then recalculate the page bonus.
      *
-     * @return array|null Signal row, or null on API error.
+     * @return array<string, mixed>|null Signal row, or null on API error.
      */
     public static function fetchAndStoreWallet(int $userId, int $pageId, string $chain, string $address, bool $force = false): ?array
     {
@@ -98,39 +98,88 @@ final class SignalRefreshService
 
         SignalRepository::upsert($row);
 
-        // Recalculate total bonus from all wallets for this page
-        $allSignals = SignalRepository::get_for_page($pageId);
-        $totalBonus = array_sum(array_column($allSignals, 'score_contribution'));
-        $totalBonus = min($totalBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-        BonusService::applyBonus($pageId, $totalBonus);
+        // Recalculate total bonus from all wallets for this page.
+        // Skip bonus recalculation when called without a real page (e.g. seed before page exists).
+        if ($pageId > 0) {
+            $allSignals = SignalRepository::get_for_page($pageId);
+            $totalBonus = array_sum(array_column($allSignals, 'score_contribution'));
+            $totalBonus = min($totalBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+            BonusService::applyBonus($pageId, $totalBonus);
+        }
 
         return $row;
     }
 
+    /** Max seconds a single cron batch can run before yielding. */
+    private const BATCH_TIME_BUDGET = 45;
+
+    /** Pages processed per batch iteration. */
+    private const BATCH_SIZE = 20;
+
     /**
-     * Daily cron: refresh signals for all pages with wallets.
+     * Daily cron: kick off the batch refresh cycle.
+     *
+     * Instead of scheduling O(N) individual wp_cron events (which bloats
+     * the serialized _cron option), we store the batch offset in a
+     * transient and schedule a SINGLE continuation event. Each tick
+     * processes BATCH_SIZE pages within a time budget, then re-schedules
+     * itself if more pages remain.
      *
      * Hooked to: bcc_onchain_daily_refresh
      */
     public static function dailyRefresh(): void
     {
-        // Prevent overlapping runs when WP-Cron fires on concurrent requests.
         if (!\BCC\Onchain\Repositories\LockRepository::acquire('bcc_onchain_daily_refresh', 0)) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[bcc-onchain-signals] daily_refresh_lock_held', [
+                    'message' => 'Could not acquire advisory lock — previous run may still be active.',
+                ]);
+            }
             return;
         }
 
         try {
-        // Also process any pending bonus retries.
-        BonusRetryService::processAll();
+            // Process any pending bonus retries first.
+            BonusRetryService::processAll();
+
+            // Reset the batch cursor and start processing.
+            delete_option('bcc_onchain_refresh_offset');
+            self::processBatch();
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release('bcc_onchain_daily_refresh');
+        }
+    }
+
+    /**
+     * Process a batch of pages within the time budget.
+     *
+     * If more pages remain after the budget is exhausted, schedules a
+     * single continuation event 30 seconds in the future. This keeps
+     * the _cron option at O(1) size instead of O(N).
+     *
+     * Hooked to: bcc_onchain_refresh_batch
+     */
+    public static function processBatch(): void
+    {
+        $startTime = time();
+        // Use wp_option (persistent) instead of transient for the batch
+        // cursor. Transients have a TTL that can expire mid-batch if the
+        // full refresh takes longer than HOUR_IN_SECONDS, losing the cursor
+        // and causing pages to be skipped or re-processed.
+        $offset    = (int) get_option('bcc_onchain_refresh_offset', 0);
 
         $walletService = ServiceLocator::resolveWalletLinkRead();
         $supported     = ChainSupport::supported();
-        $batchSize     = 100;
-        $offset        = 0;
-        $stagger       = 0;
+        $hasMore       = false;
 
         do {
-            $owners = $walletService->getUserIdsWithLinks($supported, $batchSize, $offset);
+            // Time budget check — yield to avoid PHP timeout.
+            if ((time() - $startTime) >= self::BATCH_TIME_BUDGET) {
+                $hasMore = true;
+                break;
+            }
+
+            $owners = $walletService->getUserIdsWithLinks($supported, self::BATCH_SIZE, $offset);
 
             if (empty($owners)) {
                 break;
@@ -139,17 +188,38 @@ final class SignalRefreshService
             foreach ($owners as $ownerId) {
                 $pageId = ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($ownerId);
 
-                if ($pageId && !wp_next_scheduled('bcc_onchain_refresh_page', [$pageId])) {
-                    wp_schedule_single_event(time() + (10 * $stagger), 'bcc_onchain_refresh_page', [$pageId]);
-                    $stagger++;
+                if ($pageId) {
+                    self::fetchAndStoreForPage($pageId, false);
+                }
+
+                // Re-check time budget after each page (API calls are slow).
+                // Wall clock advances during fetchAndStoreForPage() — re-evaluate.
+                if (self::isTimeBudgetExceeded($startTime)) {
+                    $hasMore = true;
+                    break 2;
                 }
             }
 
-            $offset += $batchSize;
-        } while (count($owners) === $batchSize);
+            $offset += self::BATCH_SIZE;
 
-        } finally {
-            \BCC\Onchain\Repositories\LockRepository::release('bcc_onchain_daily_refresh');
+            // If we got a full batch, there may be more.
+            if (count($owners) === self::BATCH_SIZE) {
+                $hasMore = true;
+            } else {
+                $hasMore = false;
+            }
+        } while (true);
+
+        if ($hasMore) {
+            // Save cursor and schedule continuation — single event, O(1).
+            update_option('bcc_onchain_refresh_offset', $offset, false);
+
+            if (!wp_next_scheduled('bcc_onchain_refresh_batch')) {
+                wp_schedule_single_event(time() + 30, 'bcc_onchain_refresh_batch');
+            }
+        } else {
+            // All pages processed — clean up cursor.
+            delete_option('bcc_onchain_refresh_offset');
         }
     }
 
@@ -161,5 +231,16 @@ final class SignalRefreshService
     public static function refreshPage(int $pageId): void
     {
         self::fetchAndStoreForPage($pageId, false);
+    }
+
+    /**
+     * Check whether the batch time budget has been exceeded.
+     *
+     * Extracted to a method so PHPStan doesn't narrow time() across
+     * function calls that perform blocking I/O.
+     */
+    private static function isTimeBudgetExceeded(int $startTime): bool
+    {
+        return (time() - $startTime) >= self::BATCH_TIME_BUDGET;
     }
 }

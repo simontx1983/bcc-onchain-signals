@@ -116,6 +116,7 @@ class SettingsPage
 
             <?php self::render_indexer_stats(); ?>
             <?php self::render_enrichment_stats(); ?>
+            <?php self::render_signal_health(); ?>
 
         </div>
         <?php
@@ -219,6 +220,166 @@ class SettingsPage
                     <?php endif; ?>
                 </p>
             <?php endif; ?>
+        <?php endif;
+    }
+
+    /**
+     * Render the signal fetcher health panel.
+     *
+     * Shows per-chain last success, consecutive failures, and circuit
+     * breaker state so admins can diagnose silent degradation.
+     */
+    private static function render_signal_health(): void
+    {
+        if (!class_exists('\\BCC\\Onchain\\Services\\SignalFetcher')) {
+            return;
+        }
+
+        $statuses = \BCC\Onchain\Services\SignalFetcher::getChainHealthStatus();
+
+        ?>
+        <hr>
+        <h2>Signal Fetcher Health</h2>
+        <?php if (empty(array_filter($statuses))): ?>
+            <p>No health data recorded yet. Signals are fetched on demand when users connect wallets.</p>
+        <?php else: ?>
+            <table class="widefat striped" style="max-width:900px">
+                <thead>
+                    <tr>
+                        <th>Chain</th>
+                        <th>Status</th>
+                        <th>Last Success</th>
+                        <th>Consecutive Failures</th>
+                        <th>Last Failure</th>
+                        <th>Circuit Breaker</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($statuses as $chain => $health):
+                        if (empty($health)) {
+                            continue;
+                        }
+                        $status   = $health['status'] ?? 'unknown';
+                        $lastOk   = isset($health['last_success']) ? human_time_diff((int) $health['last_success']) . ' ago' : 'never';
+                        $failures = (int) ($health['consecutive_failures'] ?? 0);
+                        $lastFail = isset($health['last_failure']) ? human_time_diff((int) $health['last_failure']) . ' ago' : '—';
+
+                        $statusColor = match ($status) {
+                            'healthy'      => '#00a32a',
+                            'intermittent' => '#dba617',
+                            'degraded'     => '#d63638',
+                            default        => '#666',
+                        };
+
+                        $breakerOpen = $failures >= 5 && isset($health['last_failure'])
+                            && (time() - (int) $health['last_failure']) < 900;
+                    ?>
+                    <tr>
+                        <td><strong><?php echo esc_html(ucfirst($chain)); ?></strong></td>
+                        <td style="color:<?php echo esc_attr($statusColor); ?>;font-weight:600">
+                            <?php echo esc_html(ucfirst($status)); ?>
+                        </td>
+                        <td><?php echo esc_html($lastOk); ?></td>
+                        <td><?php echo $failures; ?></td>
+                        <td><?php echo esc_html($lastFail); ?></td>
+                        <td>
+                            <?php if ($breakerOpen): ?>
+                                <span style="color:#d63638;font-weight:600">&#9940; OPEN</span>
+                                <br><small>Cooldown: <?php echo 900 - (time() - (int) $health['last_failure']); ?>s remaining</small>
+                            <?php else: ?>
+                                <span style="color:#00a32a">&#9989; Closed</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        <?php endif;
+
+        // ── Data Freshness & Validator Coverage ─────────────────────────
+        $indexerStats = get_option('bcc_onchain_indexer_stats', []);
+        $validatorCounts = class_exists('\\BCC\\Onchain\\Repositories\\ValidatorRepository')
+            ? \BCC\Onchain\Repositories\ValidatorRepository::getCountsByChain()
+            : [];
+
+        if (!empty($indexerStats) || !empty($validatorCounts)):
+        ?>
+        <hr>
+        <h2>Data Freshness</h2>
+        <table class="widefat striped" style="max-width:900px">
+            <thead>
+                <tr>
+                    <th>Chain</th>
+                    <th>Known Validators</th>
+                    <th>Last Indexed</th>
+                    <th>Freshness</th>
+                    <th>Last Run Result</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php foreach ($indexerStats as $slug => $stats):
+                    $chainId    = 0;
+                    $knownCount = 0;
+                    $lastFetched = '—';
+
+                    // Match chain slug to validator counts
+                    foreach ($validatorCounts as $cid => $vc) {
+                        // Best-effort match via indexer stats
+                        $knownCount = (int) $vc->cnt;
+                        $lastFetched = $vc->last_fetched ?? '—';
+                    }
+
+                    $timestamp   = $stats['timestamp'] ?? '';
+                    $indexedAgo  = $timestamp ? human_time_diff(strtotime($timestamp)) . ' ago' : 'never';
+                    $isPartial   = !empty($stats['partial']);
+                    $isStale     = $timestamp && (time() - strtotime($timestamp)) > 6 * HOUR_IN_SECONDS;
+                ?>
+                <tr>
+                    <td><strong><?php echo esc_html($stats['chain'] ?? $slug); ?></strong></td>
+                    <td><?php echo $knownCount; ?></td>
+                    <td><?php echo esc_html($indexedAgo); ?></td>
+                    <td>
+                        <?php if ($isStale): ?>
+                            <span style="color:#d63638;font-weight:600">STALE (&gt;6h)</span>
+                        <?php else: ?>
+                            <span style="color:#00a32a">Fresh</span>
+                        <?php endif; ?>
+                    </td>
+                    <td>
+                        <?php if ($isPartial): ?>
+                            <span style="color:#dba617">Partial fetch</span>
+                        <?php else: ?>
+                            <?php echo (int) ($stats['total'] ?? 0); ?> validators
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+        endif;
+
+        // ── API Budget ──────────────────────────────────────────────────
+        if (class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')):
+            /** @var array<string, mixed> $budgetStats */
+            $budgetStats = get_option('bcc_onchain_enrichment_stats', []);
+            $apiCallsUsed = (int) ($budgetStats['api_calls_total'] ?? 0);
+            $maxCalls     = defined('BCC_ONCHAIN_MAX_API_CALLS') ? (int) BCC_ONCHAIN_MAX_API_CALLS : 200;
+            $budgetPct    = $maxCalls > 0 ? min(100, (int) (($apiCallsUsed * 100) / $maxCalls)) : 0;
+            $budgetColor  = $budgetPct > 90 ? '#d63638' : ($budgetPct > 70 ? '#dba617' : '#00a32a');
+        ?>
+        <hr>
+        <h2>API Budget</h2>
+        <p>
+            Enrichment API calls this cycle:
+            <strong style="color:<?php echo esc_attr($budgetColor); ?>">
+                <?php echo $apiCallsUsed; ?> / <?php echo $maxCalls; ?>
+            </strong>
+            (<?php echo $budgetPct; ?>%)
+        </p>
+        <div style="width:300px;height:20px;background:#ddd;border-radius:3px;overflow:hidden">
+            <div style="width:<?php echo $budgetPct; ?>%;height:100%;background:<?php echo esc_attr($budgetColor); ?>"></div>
+        </div>
         <?php endif;
     }
 }

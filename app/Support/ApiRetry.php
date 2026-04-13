@@ -35,12 +35,12 @@ final class ApiRetry
      *
      * @param callable $fn        Must return a WP HTTP response array or WP_Error.
      *                            Signature: fn(): array|WP_Error
-     * @param array    $options   {
+     * @param array<string, mixed> $options   {
      *     @type int    $max_retries   Max retry attempts (default 3).
      *     @type string $label         Human-readable label for logging (e.g. "Cosmos LCD /validators").
      *     @type int    $chain_id      Chain ID for circuit breaker integration.
      * }
-     * @return array|WP_Error  The final HTTP response or WP_Error after all retries exhausted.
+     * @return array<string, mixed>|\WP_Error  The final HTTP response or WP_Error after all retries exhausted.
      */
     public static function request(callable $fn, array $options = [])
     {
@@ -164,12 +164,27 @@ final class ApiRetry
      * Convenience: wp_remote_get with retry.
      *
      * @param string $url     Request URL.
-     * @param array  $args    wp_remote_get args (timeout, headers, etc.).
-     * @param array  $options ApiRetry options (max_retries, label, chain_id).
-     * @return array|WP_Error
+     * @param array<string, mixed>  $args    wp_remote_get args (timeout, headers, etc.).
+     * @param array<string, mixed>  $options ApiRetry options (max_retries, label, chain_id).
+     * @return array<string, mixed>|\WP_Error
      */
     public static function get(string $url, array $args = [], array $options = [])
     {
+        $pinResult = self::validateAndPinUrl($url);
+        if ($pinResult instanceof \WP_Error) {
+            return $pinResult;
+        }
+
+        // Pin the resolved IP so cURL cannot re-resolve to a different address.
+        if ($pinResult !== null) {
+            $args = self::injectCurlResolve($args, $pinResult['host'], $pinResult['port'], $pinResult['ip']);
+        }
+
+        // Disable redirects: each hop could target a private IP, bypassing
+        // our DNS pinning. Chain APIs should not redirect. If one does, the
+        // caller must handle it explicitly with a fresh validateAndPinUrl().
+        $args['redirection'] = 0;
+
         return self::request(
             fn() => wp_remote_get($url, $args),
             $options
@@ -180,16 +195,173 @@ final class ApiRetry
      * Convenience: wp_remote_post with retry.
      *
      * @param string $url     Request URL.
-     * @param array  $args    wp_remote_post args (timeout, headers, body, etc.).
-     * @param array  $options ApiRetry options (max_retries, label, chain_id).
-     * @return array|WP_Error
+     * @param array<string, mixed>  $args    wp_remote_post args (timeout, headers, body, etc.).
+     * @param array<string, mixed>  $options ApiRetry options (max_retries, label, chain_id).
+     * @return array<string, mixed>|\WP_Error
      */
     public static function post(string $url, array $args = [], array $options = [])
     {
+        $pinResult = self::validateAndPinUrl($url);
+        if ($pinResult instanceof \WP_Error) {
+            return $pinResult;
+        }
+
+        if ($pinResult !== null) {
+            $args = self::injectCurlResolve($args, $pinResult['host'], $pinResult['port'], $pinResult['ip']);
+        }
+
+        $args['redirection'] = 0;
+
         return self::request(
             fn() => wp_remote_post($url, $args),
             $options
         );
+    }
+
+    // ── SSRF Protection ────────────────────────────────────────────────────
+
+    /**
+     * Validate a URL and resolve its IP for pinning.
+     *
+     * Every URL — including hardcoded ones — is validated. No safe-host
+     * shortcuts: attackers can poison DNS for any domain.
+     *
+     * Returns:
+     *   - WP_Error if the URL is blocked (private IP, invalid, etc.)
+     *   - null if the host is already an IP literal (no pinning needed)
+     *   - array{host: string, port: int, ip: string} for hostname-based
+     *     URLs so the caller can pin via CURLOPT_RESOLVE
+     *
+     * @return \WP_Error|array{host: string, port: int, ip: string}|null
+     */
+    private static function validateAndPinUrl(string $url)
+    {
+        $parsed = parse_url($url);
+        if (!is_array($parsed) || !isset($parsed['host'])) {
+            return new \WP_Error('ssrf_invalid_url', 'Invalid URL: missing host');
+        }
+
+        $host   = $parsed['host'];
+        $scheme = $parsed['scheme'] ?? '';
+
+        if (!in_array($scheme, ['http', 'https'], true)) {
+            return new \WP_Error('ssrf_invalid_scheme', 'Only HTTP(S) URLs are allowed');
+        }
+
+        // Block cloud metadata endpoints by hostname before DNS resolution.
+        $blockedHosts = ['metadata.google.internal', 'metadata.google.com'];
+        if (in_array(strtolower($host), $blockedHosts, true)) {
+            self::log("SSRF BLOCKED: metadata endpoint {$host}");
+            return new \WP_Error('ssrf_blocked', 'Blocked request to cloud metadata endpoint');
+        }
+
+        // If host is already an IP literal, validate it directly.
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            if (!filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                self::log("SSRF BLOCKED: direct IP {$host} is private/reserved");
+                return new \WP_Error('ssrf_blocked', "Blocked request to private/reserved IP: {$host}");
+            }
+            return null; // IP literal — no DNS to pin.
+        }
+
+        // ── Collect ALL resolved IPs (A + AAAA), validate, pin ────────
+        // Strategy: gather every IP the host resolves to, discard any
+        // private/reserved addresses, then pin the first valid public IP.
+        // If NO public IPs remain, block the request entirely.
+        // This prevents mixed-record attacks where one valid A record
+        // passes validation but cURL picks a private AAAA record.
+        /** @var string[] $validPublicIps */
+        $validPublicIps = [];
+        $flags = FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE;
+
+        // Collect IPv4 (A records) via gethostbyname.
+        $ipv4 = gethostbyname($host);
+        if ($ipv4 !== $host && filter_var($ipv4, FILTER_VALIDATE_IP, $flags)) {
+            $validPublicIps[] = $ipv4;
+        }
+
+        // Collect IPv6 (AAAA records) via dns_get_record.
+        $aaaaRecords = @dns_get_record($host, DNS_AAAA);
+        if (is_array($aaaaRecords)) {
+            foreach ($aaaaRecords as $record) {
+                $ipv6 = $record['ipv6'] ?? '';
+                if ($ipv6 !== '' && filter_var($ipv6, FILTER_VALIDATE_IP, $flags)) {
+                    $validPublicIps[] = $ipv6;
+                }
+            }
+        }
+
+        // If no public IPs found, block.
+        if (empty($validPublicIps)) {
+            self::log("SSRF BLOCKED: {$host} has no public IPs (all private/reserved or DNS failed)");
+            return new \WP_Error('ssrf_blocked', "Blocked: {$host} resolves to no public IP addresses");
+        }
+
+        // Pin the first valid public IP. Prefer IPv4 for compatibility.
+        $pinnedIp = $validPublicIps[0];
+        $port     = (int) ($parsed['port'] ?? ($scheme === 'https' ? 443 : 80));
+
+        return ['host' => $host, 'port' => $port, 'ip' => $pinnedIp];
+    }
+
+    /**
+     * Pinned DNS entries: host → "host:port:ip" for CURLOPT_RESOLVE.
+     *
+     * Populated by validateAndPinUrl(), consumed by the http_api_curl hook.
+     * Entries are per-request (PHP is single-threaded) and cleared after use.
+     *
+     * @var array<string, string>
+     */
+    private static array $pinnedResolves = [];
+
+    /** Whether the http_api_curl hook has been registered. */
+    private static bool $hookRegistered = false;
+
+    /**
+     * Pin a hostname to a resolved IP so cURL cannot re-resolve DNS.
+     *
+     * Sets CURLOPT_RESOLVE via WordPress's http_api_curl action hook.
+     * The Host header remains the original hostname (TLS SNI + vhosts),
+     * but the TCP connection goes to the pinned IP.
+     *
+     * @param array<string, mixed> $args  WP HTTP API args (returned unchanged).
+     * @param string $host  Original hostname.
+     * @param int    $port  Target port.
+     * @param string $ip    Validated IP address.
+     * @return array<string, mixed>
+     */
+    private static function injectCurlResolve(array $args, string $host, int $port, string $ip): array
+    {
+        self::$pinnedResolves[$host] = "{$host}:{$port}:{$ip}";
+
+        if (!self::$hookRegistered) {
+            add_action('http_api_curl', [self::class, 'applyCurlResolve'], 99, 3);
+            self::$hookRegistered = true;
+        }
+
+        return $args;
+    }
+
+    /**
+     * WordPress http_api_curl hook: apply pinned DNS entries.
+     *
+     * @param resource|\CurlHandle $handle     cURL handle.
+     * @param array<string, mixed> $parsedArgs Parsed HTTP args.
+     * @param string               $url        Request URL.
+     */
+    public static function applyCurlResolve(&$handle, array $parsedArgs, string $url): void
+    {
+        if (empty(self::$pinnedResolves)) {
+            return;
+        }
+
+        $host = (string) parse_url($url, PHP_URL_HOST);
+
+        if ($host !== '' && isset(self::$pinnedResolves[$host])) {
+            curl_setopt($handle, CURLOPT_RESOLVE, [self::$pinnedResolves[$host]]);
+            // Clear after use — one pin per request cycle.
+            unset(self::$pinnedResolves[$host]);
+        }
     }
 
     // ── Internal ────────────────────────────────────────────────────────────
@@ -211,6 +383,8 @@ final class ApiRetry
     /**
      * Parse the Retry-After header from a 429 response.
      * Returns seconds to wait. Falls back to DEFAULT_429_FALLBACK.
+     *
+     * @param array<string, mixed>|\WP_Error $response
      */
     private static function parseRetryAfter($response): int
     {

@@ -19,6 +19,7 @@ use BCC\Onchain\Repositories\ChainRepository;
  */
 final class WalletLinkReadService implements WalletLinkReadInterface
 {
+    /** @return array<string, string[]> Chain slug => wallet addresses */
     public function getLinksForUser(int $userId): array
     {
         $rows = WalletRepository::getForUser($userId);
@@ -45,6 +46,10 @@ final class WalletLinkReadService implements WalletLinkReadInterface
         return WalletRepository::hasLinkForChain($userId, (int) $chainObj->id);
     }
 
+    /**
+     * @param string[] $chains
+     * @return int[]
+     */
     public function getUserIdsWithLinks(array $chains, int $limit = 100, int $offset = 0): array
     {
         return WalletRepository::getUserIdsWithChainSlugs($chains, $limit, $offset);

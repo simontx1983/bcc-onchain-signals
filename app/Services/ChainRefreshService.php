@@ -48,6 +48,9 @@ class ChainRefreshService
     /**
      * Register custom cron intervals.
      */
+    /** @param array<string, array{interval: int, display: string}> $schedules
+     *  @return array<string, array{interval: int, display: string}>
+     */
     public static function add_cron_intervals(array $schedules): array
     {
         $schedules['every_4_hours'] = [
@@ -140,6 +143,8 @@ class ChainRefreshService
                 ChainRepository::getActive('near')
             );
 
+            $hasPartialFetch = false;
+
             foreach ($chains as $chain) {
                 $chainId = (int) $chain->id;
 
@@ -163,6 +168,28 @@ class ChainRefreshService
                     $validators = $fetcher->fetch_all_validators();
 
                     if (!empty($validators)) {
+                        $returnedCount = count($validators);
+
+                        // Detect partial fetch: if we got significantly fewer
+                        // validators than previously known for this chain, the
+                        // RPC likely returned a truncated result (timeout, pagination).
+                        // In that case, do NOT treat missing validators as gone.
+                        $chainCounts = ValidatorRepository::getCountsByChain();
+                        $knownCount  = isset($chainCounts[$chainId]) ? (int) $chainCounts[$chainId]->cnt : 0;
+                        // Two detection rules (either triggers):
+                        // 1. Relative: got < 70% of known validators (gradual truncation)
+                        // 2. Absolute floor: known > 200 but got < 50 (catastrophic truncation)
+                        $isPartialFetch = ($knownCount > 10 && $returnedCount < (int) ($knownCount * 0.7))
+                            || ($knownCount > 200 && $returnedCount < 50);
+
+                        if ($isPartialFetch) {
+                            \BCC\Core\Log\Logger::warning(sprintf(
+                                '[Onchain] Partial fetch detected for %s: got %d, expected ~%d. Skipping dead-validator marking for this chain.',
+                                $chain->name, $returnedCount, $knownCount
+                            ));
+                            $hasPartialFetch = true;
+                        }
+
                         $stats = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
 
                         // Persist per-chain stats for the admin dashboard.
@@ -170,22 +197,28 @@ class ChainRefreshService
                         $allStats[$chain->slug] = array_merge($stats, [
                             'chain'     => $chain->name,
                             'timestamp' => current_time('mysql', true),
+                            'partial'   => $isPartialFetch,
                         ]);
                         update_option('bcc_onchain_indexer_stats', $allStats, false);
 
                         \BCC\Core\Log\Logger::info(sprintf(
-                            '[Onchain] Indexed %s: %d total, %d new, %d updated, %d unchanged, %d refreshed',
+                            '[Onchain] Indexed %s: %d total, %d new, %d updated, %d unchanged, %d refreshed%s',
                             $chain->name, $stats['total'], $stats['new'], $stats['updated'],
-                            $stats['unchanged'], $stats['refreshed'] ?? 0
+                            $stats['unchanged'], $stats['refreshed'],
+                            $isPartialFetch ? ' (PARTIAL)' : ''
                         ));
 
-                        CircuitBreaker::recordSuccess($chainId);
+                        if (!$isPartialFetch) {
+                            CircuitBreaker::recordSuccess($chainId);
+                        }
                     } else {
                         // Empty result from an active chain is suspicious
+                        $hasPartialFetch = true;
                         CircuitBreaker::recordFailure($chainId);
                         \BCC\Core\Log\Logger::warning('[Onchain] Validator index returned empty for ' . $chain->name);
                     }
                 } catch (\Exception $e) {
+                    $hasPartialFetch = true;
                     CircuitBreaker::recordFailure($chainId);
                     \BCC\Core\Log\Logger::error('[Onchain] Validator index failed for ' . $chain->name . ': ' . $e->getMessage());
                 }
@@ -193,7 +226,13 @@ class ChainRefreshService
 
             // After indexing, clean up validators that the indexer hasn't seen
             // in 30+ days and have exhausted retry attempts — they're gone.
-            EnrichmentScheduler::markDeadValidators();
+            // Skip if ANY chain had a partial/failed fetch to prevent marking
+            // validators dead due to transient RPC issues.
+            if (!$hasPartialFetch) {
+                EnrichmentScheduler::markDeadValidators();
+            } else {
+                \BCC\Core\Log\Logger::info('[Onchain] Skipped markDeadValidators — partial fetch detected in this run.');
+            }
         } finally {
             self::releaseLock('index_validators');
         }

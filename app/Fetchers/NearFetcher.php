@@ -42,6 +42,8 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Fetch a single validator by account ID.
+     *
+     * @return array<string, mixed>
      */
     public function fetch_validator(string $address): array
     {
@@ -58,6 +60,8 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Fetch all active validators sorted by stake descending.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_all_validators(): array
     {
@@ -82,6 +86,8 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Enrich a validator. NEAR returns all data in one RPC call.
+     *
+     * @return array<string, mixed>
      */
     public function enrich_validator(string $address, ?object $existingRow = null): array
     {
@@ -90,12 +96,15 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Not supported.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
         return [];
     }
 
+    /** @return array<int, array<string, mixed>> */
     public function fetch_top_collections(int $limit = 100): array
     {
         return [];
@@ -105,6 +114,8 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Fetch current_validators from the NEAR RPC.
+     *
+     * @return array<int, array<string, mixed>>
      */
     private function getCurrentValidators(): array
     {
@@ -119,6 +130,9 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Map a NEAR validator to the standard schema.
+     *
+     * @param array<string, mixed> $v
+     * @return array<string, mixed>
      */
     private function mapValidator(array $v, int $rank): array
     {
@@ -170,6 +184,9 @@ class NearFetcher implements FetcherInterface
 
     /**
      * Make a JSON-RPC call to the NEAR RPC endpoint.
+     *
+     * @param array<int, mixed> $params
+     * @return array<string, mixed>|null
      */
     private function rpcCall(string $method, array $params): ?array
     {

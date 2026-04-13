@@ -56,6 +56,7 @@ class SignalRepository
         dbDelta($sql);
     }
 
+    /** @param array<string, mixed> $data */
     public static function upsert(array $data): void
     {
         global $wpdb;
@@ -97,6 +98,8 @@ class SignalRepository
 
     /**
      * Return stored data if fetched within BCC_ONCHAIN_CACHE_HOURS.
+     *
+     * @return array<string, mixed>|null
      */
     public static function get_cached(string $address, string $chain): ?array
     {
@@ -117,6 +120,8 @@ class SignalRepository
 
     /**
      * Return stored data regardless of age.
+     *
+     * @return array<string, mixed>|null
      */
     public static function get_permanent(string $address, string $chain): ?array
     {
@@ -137,6 +142,8 @@ class SignalRepository
      * Results are served from object cache (per-request, persistent with Redis)
      * backed by a transient (cross-request on vanilla WP). The cache is keyed
      * by owner user_id and invalidated automatically on upsert().
+     *
+     * @return array<int, array<string, mixed>>
      */
     public static function get_for_page(int $page_id): array
     {
@@ -150,6 +157,8 @@ class SignalRepository
 
     /**
      * Get all signals for a user, with two-tier caching.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public static function getByUser(int $userId): array
     {

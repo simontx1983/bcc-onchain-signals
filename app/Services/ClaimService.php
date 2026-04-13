@@ -31,7 +31,7 @@ class ClaimService {
     /** @var string[] Valid entity types. */
     private const ENTITY_TYPES = ['validator', 'collection'];
 
-    /** @var string[] Valid claim roles per entity type. */
+    /** @var array<string, string[]> Valid claim roles per entity type. */
     private const VALID_ROLES = [
         'validator'  => ['operator'],
         'collection' => ['creator', 'holder'],
@@ -49,7 +49,7 @@ class ClaimService {
      * Checks if the user has a connected wallet that matches the entity's
      * on-chain owner/operator. If matched, records a verified claim.
      *
-     * @return array{success: bool, message: string, claim_id?: int, role?: string}
+     * @return array{success: bool, message: string, claim_id?: int, role?: string, needs_wallet?: bool, chain_slug?: string, error?: string, is_primary?: bool}
      */
     public static function claim(int $userId, string $entityType, int $entityId): array {
         if (!in_array($entityType, self::ENTITY_TYPES, true)) {
@@ -119,7 +119,7 @@ class ClaimService {
 
             $claimId = $result['claim_id'];
         } else {
-            // Non-exclusive roles (e.g. holder) — no transaction needed.
+            // Non-exclusive roles (e.g. holder) — upsert is idempotent via ON DUPLICATE KEY.
             $claimId = ClaimRepository::upsert(
                 $userId,
                 $entityType,
@@ -137,7 +137,12 @@ class ClaimService {
 
         $isPrimary = in_array($match['role'], self::EXCLUSIVE_ROLES, true);
 
-        do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
+        // Only fire the action if this was a fresh insert (rows_affected=1).
+        // ON DUPLICATE KEY UPDATE sets rows_affected=2 for updates, 0 for no-op.
+        global $wpdb;
+        if ((int) $wpdb->rows_affected === 1) {
+            do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
+        }
 
         return [
             'success'    => true,
@@ -169,6 +174,7 @@ class ClaimService {
      * For validators: wallet's derived operator address matches validator's operator_address.
      * For collections: wallet address is the contract owner (creator) or holds tokens (holder).
      *
+     * @param object[] $wallets
      * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchWalletToEntity(array $wallets, object $entity, string $entityType): ?array {
@@ -197,6 +203,10 @@ class ClaimService {
     /**
      * Match wallet to validator operator address.
      * For Cosmos: the operator address (valoper) is derived from the same key as the wallet address.
+     */
+    /**
+     * @param object[] $wallets
+     * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchValidator(array $wallets, object $entity): ?array {
         $operatorAddr = strtolower($entity->operator_address ?? '');
@@ -242,6 +252,10 @@ class ClaimService {
     /**
      * Match wallet to collection ownership via RPC.
      * Checks owner() first (creator), then balanceOf (holder).
+     */
+    /**
+     * @param object[] $wallets
+     * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchCollection(array $wallets, object $entity): ?array {
         $contractAddr = $entity->contract_address ?? '';
@@ -314,9 +328,6 @@ class ClaimService {
         // Strip the 6-character checksum, convert 5-bit → 8-bit.
         $fiveBitData = array_slice($values, 0, -6);
         $bytes = self::convertBits($fiveBitData, 5, 8, false);
-        if ($bytes === null) {
-            return null;
-        }
 
         $raw = '';
         foreach ($bytes as $b) {
@@ -325,7 +336,11 @@ class ClaimService {
         return $raw;
     }
 
-    private static function convertBits(array $data, int $fromBits, int $toBits, bool $pad): ?array {
+    /**
+     * @param int[] $data
+     * @return int[]
+     */
+    private static function convertBits(array $data, int $fromBits, int $toBits, bool $pad): array {
         $acc    = 0;
         $bits   = 0;
         $result = [];

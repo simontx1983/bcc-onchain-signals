@@ -48,12 +48,27 @@ class SignalFetcher
      * Fetch signals for one wallet on one chain.
      *
      * @param bool $force  Delete transient cache and force a fresh API call.
-     * @return array|null  Associative array of signal data, or null on API error.
+     * @return array<string, mixed>|null  Associative array of signal data, or null on API error.
      */
+    /** Consecutive failure threshold before circuit breaker opens. */
+    private const CIRCUIT_BREAKER_THRESHOLD = 5;
+
+    /** Seconds to wait before retrying after circuit breaker opens. */
+    private const CIRCUIT_BREAKER_COOLDOWN = 900; // 15 minutes
+
+    /** @return array<string, mixed>|null */
     public static function fetch(string $address, string $chain, bool $force = false): ?array
     {
         if (!self::validate_address($address, $chain)) {
             \BCC\Core\Log\Logger::error('[Onchain] Invalid ' . $chain . ' address format: ' . $address);
+            return null;
+        }
+
+        // Circuit breaker: stop hammering a failing API. If consecutive
+        // failures exceed the threshold, return null until the cooldown
+        // expires. This prevents IP bans and wasted compute.
+        if (!$force && self::isCircuitOpen($chain)) {
+            \BCC\Core\Log\Logger::info('[Onchain] Signal fetch skipped for ' . $chain . ' — circuit breaker open');
             return null;
         }
 
@@ -76,15 +91,112 @@ class SignalFetcher
 
         if ( $result !== null ) {
             set_transient( $cache_key, $result, 6 * HOUR_IN_SECONDS );
+            self::recordChainHealth($chain, true);
+        } else {
+            self::recordChainHealth($chain, false);
         }
 
         return $result;
     }
 
     /**
+     * Check if the circuit breaker is open for a chain.
+     *
+     * Open when consecutive_failures >= threshold AND the cooldown
+     * period hasn't elapsed since the last failure.
+     */
+    private static function isCircuitOpen(string $chain): bool
+    {
+        /** @var array{consecutive_failures?: int, last_failure?: int, status?: string}|false $health */
+        $health = get_option('bcc_onchain_signal_health_' . $chain, []);
+        if (!is_array($health)) {
+            return false;
+        }
+
+        $failures    = (int) ($health['consecutive_failures'] ?? 0);
+        $lastFailure = (int) ($health['last_failure'] ?? 0);
+
+        if ($failures < self::CIRCUIT_BREAKER_THRESHOLD) {
+            return false;
+        }
+
+        // Add per-chain jitter (0-60s) to prevent thundering herd when
+        // cooldown expires. Jitter is deterministic per chain (crc32) so
+        // the same chain always gets the same offset within a request.
+        $jitter   = abs(crc32($chain)) % 60;
+        $cooldown = self::CIRCUIT_BREAKER_COOLDOWN + $jitter;
+
+        // Cooldown expired — allow one probe request (half-open state).
+        if ((time() - $lastFailure) > $cooldown) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Record per-chain signal fetch health for admin observability.
+     *
+     * Stores last_success, last_failure, and consecutive_failures in a
+     * wp_option. When consecutive failures reach the threshold, logs an
+     * error so admin/monitoring can detect silent degradation.
+     */
+    private static function recordChainHealth(string $chain, bool $success): void
+    {
+        $optionKey = 'bcc_onchain_signal_health_' . $chain;
+
+        /** @var array{last_success?: int, last_failure?: int, last_error?: string, consecutive_failures?: int, status?: string} $health */
+        $health = get_option($optionKey, []);
+        if (!is_array($health)) {
+            $health = [];
+        }
+
+        if ($success) {
+            $health['last_success']          = time();
+            $health['consecutive_failures']  = 0;
+            $health['status']                = 'healthy';
+        } else {
+            $failures = ((int) ($health['consecutive_failures'] ?? 0)) + 1;
+            $health['last_failure']          = time();
+            $health['consecutive_failures']  = $failures;
+            $health['status']                = $failures >= 3 ? 'degraded' : 'intermittent';
+
+            if ($failures >= 3) {
+                \BCC\Core\Log\Logger::error(sprintf(
+                    '[Onchain] %s signal fetching DEGRADED: %d consecutive failures. Last success: %s',
+                    $chain,
+                    $failures,
+                    isset($health['last_success']) ? gmdate('Y-m-d H:i:s', (int) $health['last_success']) : 'never'
+                ));
+            }
+        }
+
+        update_option($optionKey, $health, false);
+    }
+
+    /**
+     * Get signal health status for all chains. Admin dashboard use.
+     *
+     * @return array<string, array{last_success?: int, last_failure?: int, consecutive_failures?: int, status?: string}>
+     */
+    public static function getChainHealthStatus(): array
+    {
+        $chains = ['ethereum', 'solana', 'cosmos'];
+        $statuses = [];
+
+        foreach ($chains as $chain) {
+            /** @var array{last_success?: int, last_failure?: int, consecutive_failures?: int, status?: string}|false $health */
+            $health = get_option('bcc_onchain_signal_health_' . $chain, []);
+            $statuses[$chain] = is_array($health) ? $health : [];
+        }
+
+        return $statuses;
+    }
+
+    /**
      * Return all wallets connected to a user, keyed by chain.
      *
-     * @return array  ['ethereum' => ['0xABC…'], 'solana' => ['abc…']]
+     * @return array<string, string[]>  ['ethereum' => ['0xABC…'], 'solana' => ['abc…']]
      */
     public static function get_connected_wallets(int $user_id): array
     {
@@ -93,6 +205,7 @@ class SignalFetcher
 
     // ── Ethereum ──────────────────────────────────────────────────────────────
 
+    /** @return array<string, mixed>|null */
     private static function fetchEthereum(string $address): ?array
     {
         $api_key = defined('BCC_ETHERSCAN_API_KEY') ? BCC_ETHERSCAN_API_KEY : '';
@@ -123,19 +236,17 @@ class SignalFetcher
         $tx_count        = 0;
         $contract_count  = 0;
 
-        if (is_array($all_txs)) {
-            $tx_count = count($all_txs);
+        $tx_count = count($all_txs);
 
-            if ($tx_count > 0 && !empty($all_txs[0]->timeStamp)) {
-                $ts              = (int) $all_txs[0]->timeStamp;
-                $first_tx_at     = gmdate('Y-m-d H:i:s', $ts);
-                $wallet_age_days = (int) floor((time() - $ts) / DAY_IN_SECONDS);
-            }
+        if ($tx_count > 0 && !empty($all_txs[0]->timeStamp)) {
+            $ts              = (int) $all_txs[0]->timeStamp;
+            $first_tx_at     = gmdate('Y-m-d H:i:s', $ts);
+            $wallet_age_days = (int) floor((time() - $ts) / DAY_IN_SECONDS);
+        }
 
-            foreach ($all_txs as $tx) {
-                if (isset($tx->contractAddress) && $tx->contractAddress !== '' && strtolower($tx->from ?? '') === strtolower($address)) {
-                    $contract_count++;
-                }
+        foreach ($all_txs as $tx) {
+            if (isset($tx->contractAddress) && $tx->contractAddress !== '' && strtolower($tx->from ?? '') === strtolower($address)) {
+                $contract_count++;
             }
         }
 
@@ -155,6 +266,7 @@ class SignalFetcher
 
     // ── Solana ────────────────────────────────────────────────────────────────
 
+    /** @return array<string, mixed>|null */
     private static function fetchSolana(string $address): ?array
     {
         $signatures = self::solanaRpc('getSignaturesForAddress', [
@@ -197,6 +309,10 @@ class SignalFetcher
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
+    /**
+     * @param array<string, mixed> $params
+     * @return object[]|null
+     */
     private static function etherscanRequest(array $params): ?array
     {
         $raw = self::etherscanRequestRaw($params);
@@ -206,6 +322,7 @@ class SignalFetcher
         return null;
     }
 
+    /** @param array<string, mixed> $params */
     private static function etherscanRequestRaw(array $params): ?object
     {
         $url      = add_query_arg($params, self::ETHERSCAN_BASE);
@@ -236,6 +353,10 @@ class SignalFetcher
         return $json;
     }
 
+    /**
+     * @param array<int, mixed> $params
+     * @return object[]|null
+     */
     private static function solanaRpc(string $method, array $params): ?array
     {
         $body     = wp_json_encode(['jsonrpc' => '2.0', 'id' => 1, 'method' => $method, 'params' => $params]);

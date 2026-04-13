@@ -75,7 +75,6 @@ class ChainsPage
                     'message' => "No validators returned for {$chain->name}.",
                     'stats'   => ['total' => 0, 'new' => 0, 'updated' => 0, 'unchanged' => 0, 'enriched' => 0],
                 ]);
-                return;
             }
 
             $stats = ValidatorRepository::bulkUpsert($validators, 4 * HOUR_IN_SECONDS);
@@ -144,7 +143,6 @@ class ChainsPage
                     'message' => "No collections returned for {$chain->name}.",
                     'stats'   => ['total' => 0],
                 ]);
-                return;
             }
 
             $count = CollectionRepository::bulkUpsert($collections, 4 * HOUR_IN_SECONDS);
@@ -196,6 +194,10 @@ class ChainsPage
         <?php
     }
 
+    /**
+     * @param object[] $chains
+     * @param array<int, object> $countMap
+     */
     private static function render_validators_tab(array $chains, array $countMap, string $nonce): void
     {
         ?>
@@ -268,6 +270,10 @@ class ChainsPage
         <?php
     }
 
+    /**
+     * @param object[] $chains
+     * @param array<int, object> $countMap
+     */
     private static function render_collections_tab(array $chains, array $countMap, string $nonce): void
     {
         ?>

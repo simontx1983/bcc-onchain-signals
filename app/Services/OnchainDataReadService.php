@@ -17,16 +17,19 @@ if (!defined('ABSPATH')) {
  */
 final class OnchainDataReadService implements OnchainDataReadInterface
 {
+    /** @return array{items: object[], total: int, pages: int} */
     public function getValidatorsForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_stake'): array
     {
         return ValidatorRepository::getForProject($projectId, $page, $perPage, $orderBy);
     }
 
+    /** @return array{items: object[], total: int, pages: int} */
     public function getCollectionsForProject(int $projectId, int $page = 1, int $perPage = 8, string $orderBy = 'total_volume', bool $includeHidden = false): array
     {
         return CollectionService::getForProject($projectId, $page, $perPage, $orderBy, $includeHidden);
     }
 
+    /** @return array{active_count: int, chains_count: int, total_stake: float, total_delegators: int, top_validator: object|null} */
     public function getValidatorAggregateStats(int $projectId): array
     {
         $row = ValidatorRepository::getAggregateStatsForProject($projectId);
@@ -41,16 +44,26 @@ final class OnchainDataReadService implements OnchainDataReadInterface
         ];
     }
 
+    /** @return array{items: object[], total: int, pages: int} */
     public function getAllCollectionsForProject(int $projectId): array
     {
         return CollectionService::getAllForProject($projectId);
     }
 
+    /**
+     * @param object[] $items
+     * @return object[]
+     */
     public function enrichCollectionsWithBadges(array $items, int $ownerId, int $viewerId = 0): array
     {
         return CollectionService::enrichWithBadges($items, $ownerId, $viewerId);
     }
 
+    /**
+     * @param object[] $onchainItems
+     * @param array<int, array<string, mixed>> $manualRows
+     * @return object[]
+     */
     public function mergeCollectionsWithManual(array $onchainItems, array $manualRows): array
     {
         return CollectionService::mergeWithManual($onchainItems, $manualRows);

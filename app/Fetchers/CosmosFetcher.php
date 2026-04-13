@@ -30,7 +30,7 @@ class CosmosFetcher implements FetcherInterface
      * Static caches keyed by chain ID — shared across instances within the
      * same PHP process so enrichment batches don't re-fetch identical data.
      *
-     * @var array<int, array> Bonded validators sorted by tokens desc.
+     * @var array<int, array<int, array<string, mixed>>> Bonded validators sorted by tokens desc.
      */
     private static array $validatorListCache = [];
 
@@ -53,6 +53,7 @@ class CosmosFetcher implements FetcherInterface
 
     // ── Validator Fetching ───────────────────────────────────────────────────
 
+    /** @return array<string, mixed> */
     public function fetch_validator(string $address): array
     {
         $valoper = $this->ensureValoperPrefix($address);
@@ -116,7 +117,7 @@ class CosmosFetcher implements FetcherInterface
      *
      * @param string  $address     Validator operator address.
      * @param ?object $existingRow DB row from onchain_validators.
-     * @return array Same shape as fetch_validator().
+     * @return array<string, mixed> Same shape as fetch_validator().
      */
     public function enrich_validator(string $address, ?object $existingRow = null): array
     {
@@ -219,6 +220,8 @@ class CosmosFetcher implements FetcherInterface
     /**
      * Look up a validator in the cached bonded set.
      * Returns the raw LCD array or null if not found.
+     *
+     * @return array<string, mixed>|null
      */
     private function findInBondedCache(string $valoper): ?array
     {
@@ -242,7 +245,7 @@ class CosmosFetcher implements FetcherInterface
      * in a single call. Returns lightweight rows (no per-validator uptime
      * or governance calls — those are expensive and done on refresh).
      *
-     * @return array[] Array of validator data arrays ready for bulkUpsert.
+     * @return array<int, array<string, mixed>> Array of validator data arrays ready for bulkUpsert.
      */
     public function fetch_all_validators(): array
     {
@@ -282,6 +285,8 @@ class CosmosFetcher implements FetcherInterface
 
     /**
      * Per-wallet collection fetch is not supported on Cosmos LCD.
+     *
+     * @return array<int, array<string, mixed>>
      */
     public function fetch_collections(string $walletAddress, int $chainId = 0): array
     {
@@ -297,7 +302,7 @@ class CosmosFetcher implements FetcherInterface
      * appear here if listed on Stargaze.
      *
      * @param int $limit Max collections to return.
-     * @return array[] Normalized collection rows for bulkUpsert().
+     * @return array<int, array<string, mixed>> Normalized collection rows for bulkUpsert().
      */
     public function fetch_top_collections(int $limit = 100): array
     {
@@ -401,6 +406,10 @@ class CosmosFetcher implements FetcherInterface
 
     // ── Internal Helpers ─────────────────────────────────────────────────────
 
+    /**
+     * @param array<string, string|int> $params
+     * @return array<string, mixed>|null
+     */
     private function lcdGet(string $path, array $params = []): ?array
     {
         $chainId = (int) ($this->chain->id ?? 0);
@@ -482,6 +491,7 @@ class CosmosFetcher implements FetcherInterface
         return $map[$status] ?? 'unknown';
     }
 
+    /** @param array<string, mixed> $val */
     private function fetchUptime(array $val): ?float
     {
         $cons_key = $val['consensus_pubkey']['key'] ?? null;
@@ -564,9 +574,6 @@ class CosmosFetcher implements FetcherInterface
         $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
 
         $values = $this->convertBits(array_values(unpack('C*', $data)), 8, 5, true);
-        if ($values === null) {
-            return '';
-        }
 
         $polymod = $this->bech32Polymod(array_merge(
             $this->bech32HrpExpand($hrp),
@@ -587,6 +594,7 @@ class CosmosFetcher implements FetcherInterface
         return $result;
     }
 
+    /** @param int[] $values */
     private function bech32Polymod(array $values): int
     {
         $gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
@@ -601,6 +609,7 @@ class CosmosFetcher implements FetcherInterface
         return $chk;
     }
 
+    /** @return int[] */
     private function bech32HrpExpand(string $hrp): array
     {
         $expand = [];
@@ -614,7 +623,11 @@ class CosmosFetcher implements FetcherInterface
         return $expand;
     }
 
-    private function convertBits(array $data, int $fromBits, int $toBits, bool $pad = true): ?array
+    /**
+     * @param int[] $data
+     * @return int[]
+     */
+    private function convertBits(array $data, int $fromBits, int $toBits, bool $pad = true): array
     {
         $acc    = 0;
         $bits   = 0;
@@ -709,9 +722,6 @@ class CosmosFetcher implements FetcherInterface
 
         // Convert from 5-bit groups back to 8-bit bytes
         $bytes = $this->convertBits($fiveBitData, 5, 8, false);
-        if ($bytes === null) {
-            return null;
-        }
 
         // Pack back into a binary string
         $raw = '';
@@ -725,6 +735,8 @@ class CosmosFetcher implements FetcherInterface
     /**
      * Get the bonded validator set for this chain, sorted by tokens desc.
      * Cached per chain ID — fetched once per PHP process.
+     *
+     * @return array<int, array<string, mixed>>
      */
     private function getBondedValidators(): array
     {
@@ -766,6 +778,7 @@ class CosmosFetcher implements FetcherInterface
         return null;
     }
 
+    /** @param array<string, mixed> $val */
     private function fetchJailedCount(array $val): int
     {
         $jailed = $val['jailed'] ?? false;

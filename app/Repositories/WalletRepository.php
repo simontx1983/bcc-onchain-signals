@@ -27,6 +27,7 @@ final class WalletRepository
      * If newly inserted, returns ['id' => new_id, 'inserted' => true].
      * Returns ['id' => 0, 'inserted' => false] on hard failure.
      *
+     * @param array<string, mixed> $data
      * @return array{id: int, inserted: bool}
      */
     public static function insertOrFind(array $data): array
@@ -119,6 +120,7 @@ final class WalletRepository
         return $result !== false;
     }
 
+    /** @return object[] */
     public static function getForUser(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
     {
         global $wpdb;
@@ -151,6 +153,7 @@ final class WalletRepository
         ));
     }
 
+    /** @return object[] */
     public static function getForProject(int $postId, ?string $walletType = null): array
     {
         global $wpdb;
@@ -207,6 +210,23 @@ final class WalletRepository
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s LIMIT 1",
             $userId, $chainId, $walletAddress
+        ));
+    }
+
+    /**
+     * Count how many wallets a user has on a specific chain.
+     *
+     * Used to decide whether a newly linked wallet should be set as primary
+     * without loading every wallet row for the user (avoids N+1).
+     */
+    public static function countForUserByChain(int $userId, int $chainId): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE user_id = %d AND chain_id = %d",
+            $userId, $chainId
         ));
     }
 
