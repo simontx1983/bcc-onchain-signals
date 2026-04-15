@@ -364,6 +364,22 @@ add_action('plugins_loaded', function (): void {
         }
     });
 
+    // ── Gutenberg block ────────────────────────────────────────────────────
+    add_filter('block_categories_all', function ($categories) {
+        array_unshift($categories, [
+            'slug'  => 'bcc-onchain',
+            'title' => 'BCC On-Chain',
+            'icon'  => 'networking',
+        ]);
+        return $categories;
+    });
+
+    add_action('init', function () {
+        if (function_exists('register_block_type')) {
+            register_block_type(BCC_ONCHAIN_PATH . 'blocks/onchain-signals');
+        }
+    });
+
     // ── Shortcode ───────────────────────────────────────────────────────────
     add_shortcode('bcc_onchain_signals', function ($atts) {
         $atts    = shortcode_atts(['page_id' => 0], $atts, 'bcc_onchain_signals');
