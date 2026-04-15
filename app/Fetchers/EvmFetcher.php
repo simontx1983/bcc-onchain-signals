@@ -85,8 +85,11 @@ class EvmFetcher implements FetcherInterface
             return [];
         }
 
-        // Group by contract address — only keep contracts where this address
-        // minted (from = 0x0) which indicates creator/deployer role
+        // Group by contract address — keep contracts where this address
+        // received mints (from = 0x0). NOTE: this identifies mint recipients,
+        // not necessarily contract deployers. Actual creator/deployer role
+        // verification is performed by BlockchainQueryService::getEthRole()
+        // via on-chain owner() RPC call during the claim flow.
         $contracts = [];
         $zero      = '0x0000000000000000000000000000000000000000';
 
@@ -105,8 +108,10 @@ class EvmFetcher implements FetcherInterface
                 ];
             }
 
-            // Count mints (from zero address)
-            if (strtolower($tx->from ?? '') === $zero) {
+            // Count mints (from zero address) only when this wallet is the recipient
+            if (strtolower($tx->from ?? '') === $zero
+                && strtolower($tx->to ?? '') === strtolower($walletAddress)
+            ) {
                 $contracts[$contract]['mint_count']++;
             }
         }

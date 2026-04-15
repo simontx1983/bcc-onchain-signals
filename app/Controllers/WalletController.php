@@ -37,9 +37,6 @@ class WalletController
         add_action('wp_ajax_bcc_wallet_set_primary',  [__CLASS__, 'ajax_set_primary']);
         add_action('wp_ajax_bcc_wallet_list',         [__CLASS__, 'ajax_list']);
         add_action('wp_ajax_bcc_collection_toggle_profile', [__CLASS__, 'ajax_toggle_collection_profile']);
-        // Legacy AJAX claim handlers deleted — replaced by REST endpoint
-        // POST /bcc/v1/claim (EntityClaimEndpoint in bcc-trust-engine).
-
         add_action('rest_api_init', [__CLASS__, 'register_rest_routes']);
         add_action('wp_enqueue_scripts', [__CLASS__, 'enqueue_assets']);
     }
@@ -453,8 +450,6 @@ class WalletController
         wp_send_json_success(['collection_id' => $collection_id, 'show_on_profile' => $show]);
     }
 
-    // Legacy AJAX claim handlers (ajax_claim_entity, ajax_claim_status) deleted.
-    // Replaced by REST endpoint POST /bcc/v1/claim (EntityClaimEndpoint in bcc-trust-engine).
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

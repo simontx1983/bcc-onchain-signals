@@ -129,13 +129,17 @@
     // ── Base58 Encoding (for Solana signatures) ──────────────────────────────
 
     function base58Encode(bytes) {
+        if (!(bytes instanceof Uint8Array) || bytes.length !== 64) {
+            throw new Error('Invalid signature length');
+        }
+
         const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
         let num = BigInt(0);
         for (const b of bytes) {
             num = num * 58n + BigInt(b);
         }
 
-        // This is a simplified encoder — works for signature-length inputs
+        // BigInt-based Base58 encoder — safe for fixed-length Ed25519 signatures (64 bytes, no leading-zero ambiguity).
         let str = '';
         while (num > 0n) {
             str = alphabet[Number(num % 58n)] + str;

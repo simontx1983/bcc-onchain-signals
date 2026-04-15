@@ -25,7 +25,7 @@ final class SignalRefreshService
      *
      * @return array<int, array<string, mixed>> Array of signal rows.
      */
-    public static function fetchAndStoreForPage(int $pageId, bool $force = false): array
+    public static function fetchAndStoreForPage(int $pageId, bool $force = false, ?float $batchStartTime = null): array
     {
         $ownerId = PeepSo::get_page_owner($pageId);
         if (!$ownerId) {
@@ -37,6 +37,14 @@ final class SignalRefreshService
 
         foreach ($wallets as $chain => $addresses) {
             foreach ($addresses as $address) {
+                // Check time budget between wallet fetches (not just between pages).
+                if ($batchStartTime !== null && (microtime(true) - $batchStartTime) >= self::BATCH_TIME_BUDGET) {
+                    if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                        \BCC\Core\Log\Logger::info('[SignalRefresh] Time budget exceeded during page ' . $pageId . ', skipping remaining wallets');
+                    }
+                    break 2;
+                }
+
                 $cached = $force ? null : SignalRepository::get_cached($address, $chain);
 
                 if ($cached) {
@@ -161,7 +169,8 @@ final class SignalRefreshService
      */
     public static function processBatch(): void
     {
-        $startTime = time();
+        $startTime    = time();
+        $startTimeMic = microtime(true);
         // Use wp_option (persistent) instead of transient for the batch
         // cursor. Transients have a TTL that can expire mid-batch if the
         // full refresh takes longer than HOUR_IN_SECONDS, losing the cursor
@@ -189,7 +198,7 @@ final class SignalRefreshService
                 $pageId = ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($ownerId);
 
                 if ($pageId) {
-                    self::fetchAndStoreForPage($pageId, false);
+                    self::fetchAndStoreForPage($pageId, false, $startTimeMic);
                 }
 
                 // Re-check time budget after each page (API calls are slow).

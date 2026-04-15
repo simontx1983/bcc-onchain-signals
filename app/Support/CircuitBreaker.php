@@ -74,6 +74,69 @@ final class CircuitBreaker
                 'opened_at' => 0,
             ]);
         }
+
+        // Track last successful fetch time (persists across cache flushes)
+        update_option('bcc_onchain_last_success_' . $chainId, time(), false);
+    }
+
+    /**
+     * Identify chains with stale data (no successful fetch within $maxAgeSec).
+     *
+     * @param int[] $chainIds   Active chain IDs to check.
+     * @param int   $maxAgeSec  Maximum acceptable age in seconds (default 48 hours).
+     * @return array<int, array{last_success: int|null, age_human: string, circuit_status: string}>
+     *               Keyed by chain ID. Only stale/never-fetched chains included.
+     */
+    public static function getStaleChains(array $chainIds, int $maxAgeSec = 172800): array
+    {
+        $stale = [];
+        $now   = time();
+
+        foreach ($chainIds as $id) {
+            $id          = (int) $id;
+            $lastSuccess = get_option('bcc_onchain_last_success_' . $id, null);
+
+            $isStale = ($lastSuccess === null)
+                || (($now - (int) $lastSuccess) > $maxAgeSec);
+
+            if (!$isStale) {
+                continue;
+            }
+
+            // Determine circuit breaker status for context
+            $cbState  = self::getState($id);
+            $failures = (int) ($cbState['failures'] ?? 0);
+            $openedAt = (int) ($cbState['opened_at'] ?? 0);
+
+            if ($failures >= self::FAILURE_THRESHOLD) {
+                $elapsed       = $now - $openedAt;
+                $circuitStatus = $elapsed >= self::COOLDOWN_SECONDS ? 'HALF-OPEN' : 'OPEN';
+            } else {
+                $circuitStatus = 'CLOSED';
+            }
+
+            // Human-readable age
+            if ($lastSuccess === null) {
+                $ageHuman = 'never fetched';
+            } else {
+                $ageSec   = $now - (int) $lastSuccess;
+                $ageDays  = floor($ageSec / DAY_IN_SECONDS);
+                $ageHours = floor(($ageSec % DAY_IN_SECONDS) / HOUR_IN_SECONDS);
+                if ($ageDays > 0) {
+                    $ageHuman = sprintf('last success: %d day%s ago', $ageDays, $ageDays === 1 ? '' : 's');
+                } else {
+                    $ageHuman = sprintf('last success: %d hour%s ago', $ageHours, $ageHours === 1 ? '' : 's');
+                }
+            }
+
+            $stale[$id] = [
+                'last_success'   => $lastSuccess !== null ? (int) $lastSuccess : null,
+                'age_human'      => $ageHuman,
+                'circuit_status' => $circuitStatus,
+            ];
+        }
+
+        return $stale;
     }
 
     /**

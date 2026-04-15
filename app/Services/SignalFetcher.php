@@ -50,11 +50,9 @@ class SignalFetcher
      * @param bool $force  Delete transient cache and force a fresh API call.
      * @return array<string, mixed>|null  Associative array of signal data, or null on API error.
      */
-    /** Consecutive failure threshold before circuit breaker opens. */
+    /** Circuit breaker: trip after N consecutive failures, cooldown for N seconds. */
     private const CIRCUIT_BREAKER_THRESHOLD = 5;
-
-    /** Seconds to wait before retrying after circuit breaker opens. */
-    private const CIRCUIT_BREAKER_COOLDOWN = 900; // 15 minutes
+    private const CIRCUIT_BREAKER_COOLDOWN = 300; // Aligned with CircuitBreaker::COOLDOWN_SECONDS
 
     /** @return array<string, mixed>|null */
     public static function fetch(string $address, string $chain, bool $force = false): ?array
@@ -143,35 +141,49 @@ class SignalFetcher
      */
     private static function recordChainHealth(string $chain, bool $success): void
     {
-        $optionKey = 'bcc_onchain_signal_health_' . $chain;
+        global $wpdb;
 
-        /** @var array{last_success?: int, last_failure?: int, last_error?: string, consecutive_failures?: int, status?: string} $health */
-        $health = get_option($optionKey, []);
-        if (!is_array($health)) {
-            $health = [];
+        // Advisory lock prevents concurrent cron processes from overwriting
+        // each other's failure counts during the read-modify-write cycle.
+        $lockName = 'bcc_health_' . $chain;
+        $gotLock  = (int) $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, 0)", $lockName));
+        if (!$gotLock) {
+            return; // Another process is updating health; skip
         }
 
-        if ($success) {
-            $health['last_success']          = time();
-            $health['consecutive_failures']  = 0;
-            $health['status']                = 'healthy';
-        } else {
-            $failures = ((int) ($health['consecutive_failures'] ?? 0)) + 1;
-            $health['last_failure']          = time();
-            $health['consecutive_failures']  = $failures;
-            $health['status']                = $failures >= 3 ? 'degraded' : 'intermittent';
+        try {
+            $optionKey = 'bcc_onchain_signal_health_' . $chain;
 
-            if ($failures >= 3) {
-                \BCC\Core\Log\Logger::error(sprintf(
-                    '[Onchain] %s signal fetching DEGRADED: %d consecutive failures. Last success: %s',
-                    $chain,
-                    $failures,
-                    isset($health['last_success']) ? gmdate('Y-m-d H:i:s', (int) $health['last_success']) : 'never'
-                ));
+            /** @var array{last_success?: int, last_failure?: int, last_error?: string, consecutive_failures?: int, status?: string} $health */
+            $health = get_option($optionKey, []);
+            if (!is_array($health)) {
+                $health = [];
             }
-        }
 
-        update_option($optionKey, $health, false);
+            if ($success) {
+                $health['last_success']          = time();
+                $health['consecutive_failures']  = 0;
+                $health['status']                = 'healthy';
+            } else {
+                $failures = ((int) ($health['consecutive_failures'] ?? 0)) + 1;
+                $health['last_failure']          = time();
+                $health['consecutive_failures']  = $failures;
+                $health['status']                = $failures >= 3 ? 'degraded' : 'intermittent';
+
+                if ($failures >= 3) {
+                    \BCC\Core\Log\Logger::error(sprintf(
+                        '[Onchain] %s signal fetching DEGRADED: %d consecutive failures. Last success: %s',
+                        $chain,
+                        $failures,
+                        isset($health['last_success']) ? gmdate('Y-m-d H:i:s', (int) $health['last_success']) : 'never'
+                    ));
+                }
+            }
+
+            update_option($optionKey, $health, false);
+        } finally {
+            $wpdb->get_var($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lockName));
+        }
     }
 
     /**
@@ -291,6 +303,9 @@ class SignalFetcher
             }
         }
 
+        // Solana RPC does not expose a reliable program-deployment count.
+        // Store 0 for the DB column (NOT NULL constraint), but flag as
+        // unsupported in raw_data so the scorer can exclude this metric.
         $contract_count  = 0;
 
         return [
@@ -299,10 +314,11 @@ class SignalFetcher
             'tx_count'        => $tx_count,
             'contract_count'  => $contract_count,
             'raw_data'        => [
-                'source'           => 'solana_rpc',
-                'wallet_age_days'  => $wallet_age_days,
-                'tx_count'         => $tx_count,
-                'tx_count_capped'  => ($tx_count === 1000),
+                'source'                    => 'solana_rpc',
+                'wallet_age_days'           => $wallet_age_days,
+                'tx_count'                  => $tx_count,
+                'tx_count_capped'           => ($tx_count === 1000),
+                'contract_count_unsupported' => true,
             ],
         ];
     }

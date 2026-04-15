@@ -96,12 +96,17 @@ final class WalletRepository
         global $wpdb;
         $table = self::table();
 
+        $wpdb->query('START TRANSACTION');
+
+        // Lock the target row to prevent concurrent setPrimary calls
+        // from reading stale chain_id between SELECT and UPDATE.
         $chainId = $wpdb->get_var($wpdb->prepare(
-            "SELECT chain_id FROM {$table} WHERE id = %d AND user_id = %d",
+            "SELECT chain_id FROM {$table} WHERE id = %d AND user_id = %d FOR UPDATE",
             $walletLinkId, $userId
         ));
 
         if (!$chainId) {
+            $wpdb->query('ROLLBACK');
             return false;
         }
 
@@ -117,7 +122,13 @@ final class WalletRepository
             $chainId
         ));
 
-        return $result !== false;
+        if ($result === false) {
+            $wpdb->query('ROLLBACK');
+            return false;
+        }
+
+        $wpdb->query('COMMIT');
+        return true;
     }
 
     /** @return object[] */
@@ -206,6 +217,7 @@ final class WalletRepository
     {
         global $wpdb;
         $table = self::table();
+        $walletAddress = strtolower($walletAddress);
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s LIMIT 1",
@@ -304,7 +316,7 @@ final class WalletRepository
         $walletAddress = strtolower($walletAddress);
 
         return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(1) FROM {$table} WHERE user_id = %d AND chain_id = %d AND LOWER(wallet_address) = %s",
+            "SELECT COUNT(1) FROM {$table} WHERE user_id = %d AND chain_id = %d AND wallet_address = %s",
             $userId, $chainId, $walletAddress
         ));
     }
@@ -319,7 +331,7 @@ final class WalletRepository
         $walletAddress = strtolower($walletAddress);
 
         return (bool) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND LOWER(wallet_address) = %s",
+            "SELECT COUNT(1) FROM {$table} WHERE user_id != %d AND chain_id = %d AND wallet_address = %s",
             $userId, $chainId, $walletAddress
         ));
     }

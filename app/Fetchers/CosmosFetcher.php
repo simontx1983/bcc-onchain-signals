@@ -9,6 +9,7 @@ if (!defined('ABSPATH')) {
 use BCC\Onchain\Contracts\FetcherInterface;
 use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
+use BCC\Onchain\Support\Bech32;
 
 /**
  * Cosmos Chain Fetcher
@@ -567,87 +568,11 @@ class CosmosFetcher implements FetcherInterface
         return substr($operatorAddress, 0, $pos) . 'valcons';
     }
 
-    // ── Bech32 encoding (self-contained, matches WalletController) ───────
+    // ── Bech32 encoding/decoding (delegates to shared Support\Bech32) ───
 
     private function bech32Encode(string $hrp, string $data): string
     {
-        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-
-        $values = $this->convertBits(array_values(unpack('C*', $data)), 8, 5, true);
-
-        $polymod = $this->bech32Polymod(array_merge(
-            $this->bech32HrpExpand($hrp),
-            $values,
-            [0, 0, 0, 0, 0, 0]
-        )) ^ 1;
-
-        $checksum = [];
-        for ($i = 0; $i < 6; $i++) {
-            $checksum[] = ($polymod >> (5 * (5 - $i))) & 31;
-        }
-
-        $result = $hrp . '1';
-        foreach (array_merge($values, $checksum) as $v) {
-            $result .= $charset[$v];
-        }
-
-        return $result;
-    }
-
-    /** @param int[] $values */
-    private function bech32Polymod(array $values): int
-    {
-        $gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-        $chk = 1;
-        foreach ($values as $v) {
-            $b = $chk >> 25;
-            $chk = (($chk & 0x1ffffff) << 5) ^ $v;
-            for ($i = 0; $i < 5; $i++) {
-                $chk ^= (($b >> $i) & 1) ? $gen[$i] : 0;
-            }
-        }
-        return $chk;
-    }
-
-    /** @return int[] */
-    private function bech32HrpExpand(string $hrp): array
-    {
-        $expand = [];
-        for ($i = 0; $i < strlen($hrp); $i++) {
-            $expand[] = ord($hrp[$i]) >> 5;
-        }
-        $expand[] = 0;
-        for ($i = 0; $i < strlen($hrp); $i++) {
-            $expand[] = ord($hrp[$i]) & 31;
-        }
-        return $expand;
-    }
-
-    /**
-     * @param int[] $data
-     * @return int[]
-     */
-    private function convertBits(array $data, int $fromBits, int $toBits, bool $pad = true): array
-    {
-        $acc    = 0;
-        $bits   = 0;
-        $result = [];
-        $maxv   = (1 << $toBits) - 1;
-
-        foreach ($data as $value) {
-            $acc = ($acc << $fromBits) | $value;
-            $bits += $fromBits;
-            while ($bits >= $toBits) {
-                $bits -= $toBits;
-                $result[] = ($acc >> $bits) & $maxv;
-            }
-        }
-
-        if ($pad && $bits > 0) {
-            $result[] = ($acc << ($toBits - $bits)) & $maxv;
-        }
-
-        return $result;
+        return Bech32::encode($hrp, $data);
     }
 
     private function fetchSelfDelegation(string $valoper): ?float
@@ -691,45 +616,11 @@ class CosmosFetcher implements FetcherInterface
 
     /**
      * Decode a bech32 address to raw address bytes (20 bytes for standard Cosmos addresses).
+     * Returns null on invalid input or failed checksum verification.
      */
     private function bech32Decode(string $bech32): ?string
     {
-        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-
-        // Split at last '1'
-        $lastOne = strrpos($bech32, '1');
-        if ($lastOne === false || $lastOne < 1) {
-            return null;
-        }
-
-        $dataPart = substr($bech32, $lastOne + 1);
-        if (strlen($dataPart) < 6) {
-            return null; // need at least 6 chars for checksum
-        }
-
-        // Decode data characters to 5-bit values
-        $values = [];
-        for ($i = 0; $i < strlen($dataPart); $i++) {
-            $pos = strpos($charset, $dataPart[$i]);
-            if ($pos === false) {
-                return null;
-            }
-            $values[] = $pos;
-        }
-
-        // Strip the 6-character checksum
-        $fiveBitData = array_slice($values, 0, -6);
-
-        // Convert from 5-bit groups back to 8-bit bytes
-        $bytes = $this->convertBits($fiveBitData, 5, 8, false);
-
-        // Pack back into a binary string
-        $raw = '';
-        foreach ($bytes as $b) {
-            $raw .= chr($b);
-        }
-
-        return $raw;
+        return Bech32::decodeToBytes($bech32);
     }
 
     /**

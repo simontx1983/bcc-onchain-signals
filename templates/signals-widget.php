@@ -19,7 +19,7 @@ $_bcc_show_addr    = $_bcc_is_owner || $_bcc_is_admin;
 <div class="bcc-onchain-widget">
     <div class="bcc-onchain-widget__header">
         <span class="bcc-onchain-widget__title">On-Chain Signals</span>
-        <span class="bcc-onchain-widget__total">+<?php echo round($total_bonus, 1); ?> pts</span>
+        <span class="bcc-onchain-widget__total">+<?php echo (float) round($total_bonus, 1); ?> pts</span>
     </div>
 
     <?php foreach ($signals as $row):
@@ -37,7 +37,7 @@ $_bcc_show_addr    = $_bcc_is_owner || $_bcc_is_admin;
             <?php if ($short_addr): ?>
                 <span class="bcc-onchain-chain-addr" title="<?php echo esc_attr($addr); ?>"><?php echo esc_html($short_addr); ?></span>
             <?php endif; ?>
-            <span class="bcc-onchain-chain-score">+<?php echo round($row['score_contribution'], 1); ?> pts</span>
+            <span class="bcc-onchain-chain-score">+<?php echo (float) round($row['score_contribution'], 1); ?> pts</span>
         </div>
 
         <div class="bcc-onchain-signals-grid">
@@ -49,9 +49,9 @@ $_bcc_show_addr    = $_bcc_is_owner || $_bcc_is_admin;
                 </div>
                 <div class="bcc-onchain-signal__bar">
                     <div class="bcc-onchain-signal__bar-fill"
-                         style="width:<?php echo round(($bd['age_score'] / BCC_ONCHAIN_MAX_AGE_SCORE) * 100); ?>%"></div>
+                         style="width:<?php echo (int) round(($bd['age_score'] / BCC_ONCHAIN_MAX_AGE_SCORE) * 100); ?>%"></div>
                 </div>
-                <div class="bcc-onchain-signal__pts">+<?php echo $bd['age_score']; ?></div>
+                <div class="bcc-onchain-signal__pts">+<?php echo (float) $bd['age_score']; ?></div>
             </div>
 
             <!-- Tx depth -->
@@ -62,9 +62,9 @@ $_bcc_show_addr    = $_bcc_is_owner || $_bcc_is_admin;
                 </div>
                 <div class="bcc-onchain-signal__bar">
                     <div class="bcc-onchain-signal__bar-fill"
-                         style="width:<?php echo round(($bd['depth_score'] / BCC_ONCHAIN_MAX_DEPTH_SCORE) * 100); ?>%"></div>
+                         style="width:<?php echo (int) round(($bd['depth_score'] / BCC_ONCHAIN_MAX_DEPTH_SCORE) * 100); ?>%"></div>
                 </div>
-                <div class="bcc-onchain-signal__pts">+<?php echo $bd['depth_score']; ?></div>
+                <div class="bcc-onchain-signal__pts">+<?php echo (float) $bd['depth_score']; ?></div>
             </div>
 
             <!-- Contracts -->
@@ -75,9 +75,9 @@ $_bcc_show_addr    = $_bcc_is_owner || $_bcc_is_admin;
                 </div>
                 <div class="bcc-onchain-signal__bar">
                     <div class="bcc-onchain-signal__bar-fill"
-                         style="width:<?php echo $bd['contract_score'] > 0 ? round(($bd['contract_score'] / BCC_ONCHAIN_MAX_CONTRACT_SCORE) * 100) : 0; ?>%"></div>
+                         style="width:<?php echo (int) ($bd['contract_score'] > 0 ? round(($bd['contract_score'] / BCC_ONCHAIN_MAX_CONTRACT_SCORE) * 100) : 0); ?>%"></div>
                 </div>
-                <div class="bcc-onchain-signal__pts">+<?php echo $bd['contract_score']; ?></div>
+                <div class="bcc-onchain-signal__pts">+<?php echo (float) $bd['contract_score']; ?></div>
             </div>
         </div>
 

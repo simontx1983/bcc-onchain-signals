@@ -49,19 +49,21 @@ $cron_hooks = [
     'bcc_refresh_collections',
     'bcc_index_validators',
     'bcc_index_collections',
+    'bcc_onchain_refresh_batch',
+    'bcc_onchain_seed_wallet',
 ];
 
 foreach ($cron_hooks as $hook) {
     wp_clear_scheduled_hook($hook);
 }
 
-// Clean up transients.
+// Clean up transients — use range scans instead of LIKE wildcards.
 $wpdb->query(
     "DELETE FROM {$wpdb->options}
-     WHERE option_name LIKE '_transient_bcc_onchain_%'
-        OR option_name LIKE '_transient_timeout_bcc_onchain_%'
-        OR option_name LIKE '_transient_bcc_active_chains%'
-        OR option_name LIKE '_transient_timeout_bcc_active_chains%'
-        OR option_name LIKE '_transient_bcc_signals_%'
-        OR option_name LIKE '_transient_timeout_bcc_signals_%'"
+     WHERE (option_name >= '_transient_bcc_onchain_'         AND option_name < '_transient_bcc_onchain_~')
+        OR (option_name >= '_transient_timeout_bcc_onchain_' AND option_name < '_transient_timeout_bcc_onchain_~')
+        OR (option_name >= '_transient_bcc_active_chains'    AND option_name < '_transient_bcc_active_chains~')
+        OR (option_name >= '_transient_timeout_bcc_active_chains' AND option_name < '_transient_timeout_bcc_active_chains~')
+        OR (option_name >= '_transient_bcc_signals_'         AND option_name < '_transient_bcc_signals_~')
+        OR (option_name >= '_transient_timeout_bcc_signals_' AND option_name < '_transient_timeout_bcc_signals_~')"
 );

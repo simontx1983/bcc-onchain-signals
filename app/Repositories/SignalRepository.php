@@ -183,7 +183,7 @@ class SignalRepository
         $table = self::table();
 
         $rows = $wpdb->get_results(
-            $wpdb->prepare("SELECT " . self::COLUMNS . " FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC", $userId),
+            $wpdb->prepare("SELECT " . self::COLUMNS . " FROM {$table} WHERE user_id = %d ORDER BY score_contribution DESC LIMIT 1000", $userId),
             ARRAY_A
         ) ?: [];
 
@@ -204,6 +204,26 @@ class SignalRepository
     {
         wp_cache_delete('signals_user_' . $userId, self::CACHE_GROUP);
         delete_transient('bcc_signals_u' . $userId);
+    }
+
+    /**
+     * Delete signal rows for a specific wallet address and chain.
+     *
+     * Called on wallet disconnect to prevent stale score_contribution
+     * from lingering after the wallet link is removed.
+     */
+    public static function deleteByWallet(string $walletAddress, string $chain): int
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$table} WHERE wallet_address = %s AND chain = %s",
+            $walletAddress,
+            $chain
+        ));
+
+        return max(0, (int) $deleted);
     }
 
     private static function ttl(): int

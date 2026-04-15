@@ -21,6 +21,7 @@ use BCC\Onchain\Repositories\ClaimRepository;
 use BCC\Onchain\Repositories\ValidatorRepository;
 use BCC\Onchain\Repositories\CollectionRepository;
 use BCC\Onchain\Repositories\WalletRepository;
+use BCC\Onchain\Support\Bech32;
 
 if (!defined('ABSPATH')) {
     exit;
@@ -70,8 +71,9 @@ class ClaimService {
 
         $entityChainSlug = $entity->chain_slug ?? '';
 
-        // Get user's wallets.
-        $wallets = WalletRepository::getForUser($userId);
+        // Get user's verified wallets only — unverified wallets must not
+        // be eligible for claims (prevents address-squatting attacks).
+        $wallets = WalletRepository::getForUser($userId, null, true);
         if (empty($wallets)) {
             return [
                 'success'      => false,
@@ -118,29 +120,39 @@ class ClaimService {
             }
 
             $claimId = $result['claim_id'];
-        } else {
-            // Non-exclusive roles (e.g. holder) — upsert is idempotent via ON DUPLICATE KEY.
-            $claimId = ClaimRepository::upsert(
-                $userId,
-                $entityType,
-                $entityId,
-                $match['wallet_address'],
-                $match['chain_id'],
-                $match['role'],
-                'verified'
-            );
 
-            if (!$claimId) {
-                return ['success' => false, 'message' => 'Failed to save claim.'];
-            }
+            // Fire the verified event for exclusive claims (operator/creator).
+            do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
+
+            return [
+                'success'    => true,
+                'message'    => self::successMessage($entityType, $match['role']),
+                'claim_id'   => $claimId,
+                'role'       => $match['role'],
+                'is_primary' => true,
+            ];
         }
 
-        $isPrimary = in_array($match['role'], self::EXCLUSIVE_ROLES, true);
+        // Non-exclusive roles (e.g. holder) — upsert is idempotent via ON DUPLICATE KEY.
+        $upsertResult = ClaimRepository::upsert(
+            $userId,
+            $entityType,
+            $entityId,
+            $match['wallet_address'],
+            $match['chain_id'],
+            $match['role'],
+            'verified'
+        );
 
-        // Only fire the action if this was a fresh insert (rows_affected=1).
+        if (!$upsertResult) {
+            return ['success' => false, 'message' => 'Failed to save claim.'];
+        }
+
+        $claimId = $upsertResult['id'];
+
+        // Only fire the action if this was a fresh insert.
         // ON DUPLICATE KEY UPDATE sets rows_affected=2 for updates, 0 for no-op.
-        global $wpdb;
-        if ((int) $wpdb->rows_affected === 1) {
+        if ($upsertResult['inserted']) {
             do_action('bcc_onchain_claim_verified', $userId, $entityType, $entityId, $match['role']);
         }
 
@@ -149,7 +161,7 @@ class ClaimService {
             'message'    => self::successMessage($entityType, $match['role']),
             'claim_id'   => $claimId,
             'role'       => $match['role'],
-            'is_primary' => $isPrimary,
+            'is_primary' => false,
         ];
     }
 
@@ -301,65 +313,13 @@ class ClaimService {
 
     /**
      * Decode a bech32 address to its raw address bytes (binary string).
-     * Returns null on invalid input. Pure function — no instance state.
+     * Returns null on invalid input (including failed checksum). Pure function — no instance state.
+     *
+     * Delegates to the shared Bech32 support class which performs full
+     * polymod checksum verification before returning bytes.
      */
     private static function bech32DecodeToBytes(string $bech32): ?string {
-        $charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
-
-        $lastOne = strrpos($bech32, '1');
-        if ($lastOne === false || $lastOne < 1) {
-            return null;
-        }
-
-        $dataPart = substr($bech32, $lastOne + 1);
-        if (strlen($dataPart) < 6) {
-            return null;
-        }
-
-        $values = [];
-        for ($i = 0; $i < strlen($dataPart); $i++) {
-            $pos = strpos($charset, $dataPart[$i]);
-            if ($pos === false) {
-                return null;
-            }
-            $values[] = $pos;
-        }
-
-        // Strip the 6-character checksum, convert 5-bit → 8-bit.
-        $fiveBitData = array_slice($values, 0, -6);
-        $bytes = self::convertBits($fiveBitData, 5, 8, false);
-
-        $raw = '';
-        foreach ($bytes as $b) {
-            $raw .= chr($b);
-        }
-        return $raw;
-    }
-
-    /**
-     * @param int[] $data
-     * @return int[]
-     */
-    private static function convertBits(array $data, int $fromBits, int $toBits, bool $pad): array {
-        $acc    = 0;
-        $bits   = 0;
-        $result = [];
-        $maxv   = (1 << $toBits) - 1;
-
-        foreach ($data as $value) {
-            $acc = ($acc << $fromBits) | $value;
-            $bits += $fromBits;
-            while ($bits >= $toBits) {
-                $bits -= $toBits;
-                $result[] = ($acc >> $bits) & $maxv;
-            }
-        }
-
-        if ($pad && $bits > 0) {
-            $result[] = ($acc << ($toBits - $bits)) & $maxv;
-        }
-
-        return $result;
+        return Bech32::decodeToBytes($bech32);
     }
 
     private static function noMatchMessage(string $entityType, object $entity): string {

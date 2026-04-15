@@ -40,6 +40,7 @@ return array(
     'BCC\\Onchain\\Services\\WalletLinkWriteService' => $baseDir . '/app/Services/WalletLinkWriteService.php',
     'BCC\\Onchain\\Services\\WalletSeedService' => $baseDir . '/app/Services/WalletSeedService.php',
     'BCC\\Onchain\\Support\\ApiRetry' => $baseDir . '/app/Support/ApiRetry.php',
+    'BCC\\Onchain\\Support\\Bech32' => $baseDir . '/app/Support/Bech32.php',
     'BCC\\Onchain\\Support\\ChainSupport' => $baseDir . '/app/Support/ChainSupport.php',
     'BCC\\Onchain\\Support\\CircuitBreaker' => $baseDir . '/app/Support/CircuitBreaker.php',
     'BI\\BigInteger' => $vendorDir . '/simplito/bigint-wrapper-php/lib/BigInteger.php',

@@ -98,7 +98,7 @@ class ChainRefreshService
      * Acquire a MySQL advisory lock for a cron job.
      * Advisory locks are cross-request and don't require persistent object cache.
      */
-    private static function acquireLock(string $job, int $ttl = 900): bool
+    private static function acquireLock(string $job): bool
     {
         $acquired = \BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_GROUP . ':' . $job, 0);
 
@@ -129,7 +129,7 @@ class ChainRefreshService
      */
     public static function index_validators(): void
     {
-        if (!self::acquireLock('index_validators', 1800)) {
+        if (!self::acquireLock('index_validators')) {
             return;
         }
 
@@ -250,7 +250,7 @@ class ChainRefreshService
      */
     public static function index_collections(): void
     {
-        if (!self::acquireLock('index_collections', 1800)) {
+        if (!self::acquireLock('index_collections')) {
             return;
         }
 
@@ -322,7 +322,7 @@ class ChainRefreshService
 
     public static function refresh_collections(): void
     {
-        if (!self::acquireLock('refresh_collections', 900)) {
+        if (!self::acquireLock('refresh_collections')) {
             return;
         }
 

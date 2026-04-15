@@ -56,6 +56,52 @@ final class BonusService
     }
 
     /**
+     * Handle wallet disconnect: revoke claims for the wallet and recalculate bonuses.
+     *
+     * Extracted from the boot file closure so business logic lives in a service.
+     */
+    public static function handleWalletDisconnect(int $userId, string $chainSlug, string $walletAddress): void
+    {
+        // Resolve chain_id so deletion is scoped to the specific chain.
+        // Prevents collateral deletion of claims on other chains sharing
+        // the same address format (e.g., Ethereum + Polygon + Arbitrum).
+        $chainId = \BCC\Onchain\Repositories\ChainRepository::resolveId($chainSlug);
+
+        // Remove claims tied to this wallet address ON THIS CHAIN ONLY.
+        $deleted = \BCC\Onchain\Repositories\ClaimRepository::deleteByUserAndWallet($userId, $walletAddress, $chainId);
+
+        // Delete signal rows for the disconnected wallet so stale scores
+        // don't persist. Without this, the daily cron won't refresh a wallet
+        // that's no longer linked, and its score_contribution lingers forever.
+        SignalRepository::deleteByWallet($walletAddress, $chainSlug);
+
+        // Recalculate the on-chain bonus with the claims AND signals removed.
+        // Must include BOTH signal scores AND remaining claim bonuses
+        // (from other wallets the user still has connected).
+        $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
+        if ($pageId) {
+            $signalBonus = array_sum(array_column(
+                SignalRepository::get_for_page($pageId),
+                'score_contribution'
+            ));
+            $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
+            $claimBonus  = \BCC\Onchain\Repositories\ClaimRepository::computePageClaimBonus(
+                $walletTable,
+                $pageId,
+                $userId
+            );
+            $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+            self::applyBonus($pageId, $totalBonus);
+        }
+
+        if ($deleted && class_exists('BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::info('[bcc-onchain] claims revoked on wallet disconnect', [
+                'user_id' => $userId, 'wallet' => $walletAddress, 'claims_deleted' => $deleted,
+            ]);
+        }
+    }
+
+    /**
      * Apply a trust bonus when an on-chain claim is verified.
      *
      * Recomputes the TOTAL bonus (signals + all verified claims) for the page,

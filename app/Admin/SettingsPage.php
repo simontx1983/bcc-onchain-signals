@@ -2,6 +2,8 @@
 
 namespace BCC\Onchain\Admin;
 
+use BCC\Onchain\Support\CircuitBreaker;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -271,8 +273,8 @@ class SettingsPage
                             default        => '#666',
                         };
 
-                        $breakerOpen = $failures >= 5 && isset($health['last_failure'])
-                            && (time() - (int) $health['last_failure']) < 900;
+                        $breakerOpen = $failures >= CircuitBreaker::FAILURE_THRESHOLD && isset($health['last_failure'])
+                            && (time() - (int) $health['last_failure']) < CircuitBreaker::COOLDOWN_SECONDS;
                     ?>
                     <tr>
                         <td><strong><?php echo esc_html(ucfirst($chain)); ?></strong></td>
@@ -285,7 +287,7 @@ class SettingsPage
                         <td>
                             <?php if ($breakerOpen): ?>
                                 <span style="color:#d63638;font-weight:600">&#9940; OPEN</span>
-                                <br><small>Cooldown: <?php echo 900 - (time() - (int) $health['last_failure']); ?>s remaining</small>
+                                <br><small>Cooldown: <?php echo CircuitBreaker::COOLDOWN_SECONDS - (time() - (int) $health['last_failure']); ?>s remaining</small>
                             <?php else: ?>
                                 <span style="color:#00a32a">&#9989; Closed</span>
                             <?php endif; ?>
@@ -363,7 +365,7 @@ class SettingsPage
         if (class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')):
             /** @var array<string, mixed> $budgetStats */
             $budgetStats = get_option('bcc_onchain_enrichment_stats', []);
-            $apiCallsUsed = (int) ($budgetStats['api_calls_total'] ?? 0);
+            $apiCallsUsed = (int) ($budgetStats['api_calls'] ?? 0);
             $maxCalls     = defined('BCC_ONCHAIN_MAX_API_CALLS') ? (int) BCC_ONCHAIN_MAX_API_CALLS : 200;
             $budgetPct    = $maxCalls > 0 ? min(100, (int) (($apiCallsUsed * 100) / $maxCalls)) : 0;
             $budgetColor  = $budgetPct > 90 ? '#d63638' : ($budgetPct > 70 ? '#dba617' : '#00a32a');

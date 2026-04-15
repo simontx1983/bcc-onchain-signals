@@ -51,6 +51,15 @@ class SignalScorer
                              ? (int) $signals['contract_age_days']
                              : null;
 
+        // Check if this chain doesn't support contract detection (e.g., Solana).
+        // The flag is stored in raw_data by the fetcher. When set, contract_count
+        // is excluded from scoring so chains without detection aren't penalized.
+        $rawData = $signals['raw_data'] ?? [];
+        if (is_string($rawData)) {
+            $rawData = json_decode($rawData, true) ?: [];
+        }
+        $contractUnsupported = !empty($rawData['contract_count_unsupported']);
+
         // ── Plausibility enforcement ─────────────────────────────────
         // Clamp to reasonable maximums. Any value above these bounds
         // indicates corrupted data, API spoofing, or a bug. Log and
@@ -83,7 +92,9 @@ class SignalScorer
 
         $age_score      = self::ageScore($age_days);
         $depth_score    = self::depthScore($tx_count);
-        $contract_score = self::contractScore($contract_count, $contract_age_days);
+        // Exclude contract score for chains that don't support detection (e.g., Solana).
+        $contract_score = $contractUnsupported ? 0.0 : self::contractScore($contract_count, $contract_age_days);
+        $contract_max   = $contractUnsupported ? 0 : BCC_ONCHAIN_MAX_CONTRACT_SCORE;
 
         return [
             'age_days'          => $age_days,
@@ -94,7 +105,7 @@ class SignalScorer
             'depth_score'       => $depth_score,
             'contract_score'    => $contract_score,
             'total'             => min((float) BCC_ONCHAIN_MAX_TOTAL_BONUS, $age_score + $depth_score + $contract_score),
-            'max_possible'      => BCC_ONCHAIN_MAX_AGE_SCORE + BCC_ONCHAIN_MAX_DEPTH_SCORE + BCC_ONCHAIN_MAX_CONTRACT_SCORE,
+            'max_possible'      => BCC_ONCHAIN_MAX_AGE_SCORE + BCC_ONCHAIN_MAX_DEPTH_SCORE + $contract_max,
         ];
     }
 
@@ -149,6 +160,38 @@ class SignalScorer
                 default                   => 0.15,
             };
             $score = round($score * $multiplier, 2);
+        }
+
+        // Factory-spam discount: penalise wallets that deployed many contracts
+        // relative to their age. A legitimate developer deploying 20 contracts
+        // over 2 years is fine; deploying 20 in 1 day is factory spam.
+        // Threshold: >5 contracts per 30 days of wallet age (generous).
+        if ($count > 5 && $contract_age_days !== null && $contract_age_days > 0) {
+            $contractsPerMonth = $count / max(1, $contract_age_days / 30);
+            if ($contractsPerMonth > 5) {
+                // Scale discount from 50% (borderline) to 90% (extreme spam).
+                // Previous cap was 50% — insufficient to deter factory farms.
+                $velocityRatio = min($contractsPerMonth / 5, 20); // cap at 20x
+                $discount      = min(0.9, 0.3 + 0.6 * min(1.0, ($velocityRatio - 1) / 9));
+                $score         = round($score * (1 - $discount), 2);
+
+                \BCC\Core\Log\Logger::info('[SignalScorer] Factory-spam discount applied', [
+                    'contract_count'      => $count,
+                    'contract_age_days'   => $contract_age_days,
+                    'contracts_per_month' => round($contractsPerMonth, 2),
+                    'discount_pct'        => round($discount * 100, 1),
+                ]);
+            }
+
+            // Burst detection: all contracts deployed within a 7-day window
+            // is a strong factory-spam signal regardless of wallet age.
+            if ($contract_age_days <= 7 && $count >= 10) {
+                $score = round($score * 0.1, 2); // 90% discount
+                \BCC\Core\Log\Logger::info('[SignalScorer] Contract burst detected', [
+                    'contract_count'    => $count,
+                    'contract_age_days' => $contract_age_days,
+                ]);
+            }
         }
 
         return $score;

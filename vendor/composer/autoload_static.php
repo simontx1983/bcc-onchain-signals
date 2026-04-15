@@ -93,6 +93,7 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         'BCC\\Onchain\\Services\\WalletLinkWriteService' => __DIR__ . '/../..' . '/app/Services/WalletLinkWriteService.php',
         'BCC\\Onchain\\Services\\WalletSeedService' => __DIR__ . '/../..' . '/app/Services/WalletSeedService.php',
         'BCC\\Onchain\\Support\\ApiRetry' => __DIR__ . '/../..' . '/app/Support/ApiRetry.php',
+        'BCC\\Onchain\\Support\\Bech32' => __DIR__ . '/../..' . '/app/Support/Bech32.php',
         'BCC\\Onchain\\Support\\ChainSupport' => __DIR__ . '/../..' . '/app/Support/ChainSupport.php',
         'BCC\\Onchain\\Support\\CircuitBreaker' => __DIR__ . '/../..' . '/app/Support/CircuitBreaker.php',
         'BI\\BigInteger' => __DIR__ . '/..' . '/simplito/bigint-wrapper-php/lib/BigInteger.php',

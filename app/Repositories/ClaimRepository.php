@@ -26,9 +26,9 @@ class ClaimRepository {
     /**
      * Insert or update a claim. UNIQUE on (user_id, entity_type, entity_id).
      *
-     * @return int|false Claim ID or false on failure.
+     * @return array{id: int, inserted: bool}|false Claim data or false on failure.
      */
-    public static function upsert(int $userId, string $entityType, int $entityId, string $walletAddress, int $chainId, string $claimRole, string $status = 'verified'): int|false {
+    public static function upsert(int $userId, string $entityType, int $entityId, string $walletAddress, int $chainId, string $claimRole, string $status = 'verified'): array|false {
         global $wpdb;
         $table = self::table();
 
@@ -54,14 +54,20 @@ class ClaimRepository {
             current_time('mysql', true)
         ));
 
+        // Capture rows_affected immediately — before any other query can overwrite it.
+        // INSERT = 1, UPDATE (changed) = 2, UPDATE (no-op) = 0.
+        $inserted = ((int) $wpdb->rows_affected === 1);
+
         if ($wpdb->last_error) {
             return false;
         }
 
-        return (int) $wpdb->insert_id ?: (int) $wpdb->get_var($wpdb->prepare(
+        $claimId = (int) $wpdb->insert_id ?: (int) $wpdb->get_var($wpdb->prepare(
             "SELECT id FROM {$table} WHERE user_id = %d AND entity_type = %s AND entity_id = %d",
             $userId, $entityType, $entityId
         ));
+
+        return ['id' => $claimId, 'inserted' => $inserted];
     }
 
     /**
@@ -213,7 +219,8 @@ class ClaimRepository {
              FROM {$table} cl
              INNER JOIN {$wpdb->users} u ON u.ID = cl.user_id
              WHERE cl.entity_type = %s AND cl.entity_id IN ({$ph}) AND cl.status = 'verified'
-             ORDER BY cl.verified_at ASC",
+             ORDER BY cl.verified_at ASC
+             LIMIT 500",
             $entityType,
             ...$entityIds
         ));
@@ -273,29 +280,41 @@ class ClaimRepository {
             }
 
             // No one holds this role yet — safe to upsert under the lock.
-            $claimId = self::upsert($userId, $entityType, $entityId, $walletAddress, $chainId, $role, 'verified');
+            $upsertResult = self::upsert($userId, $entityType, $entityId, $walletAddress, $chainId, $role, 'verified');
 
-            if (!$claimId) {
+            if (!$upsertResult) {
                 return ['success' => false, 'message' => 'Failed to save claim.'];
             }
 
-            return ['success' => true, 'claim_id' => $claimId];
+            return ['success' => true, 'claim_id' => $upsertResult['id']];
         } finally {
             LockRepository::release($lockKey);
         }
     }
 
     /**
-     * Delete all claims linked to a specific wallet address for a user.
+     * Delete all claims linked to a specific wallet address for a user on a specific chain.
      *
      * Called when a wallet is disconnected so that the trust bonus is revoked.
+     * Scoped by chain_id to prevent collateral deletion of claims on other chains
+     * that share the same address format (e.g., multiple EVM chains).
      *
      * @return int Number of rows deleted.
      */
-    public static function deleteByUserAndWallet(int $userId, string $walletAddress): int {
+    public static function deleteByUserAndWallet(int $userId, string $walletAddress, ?int $chainId = null): int {
         global $wpdb;
         $table = self::table();
 
+        if ($chainId !== null) {
+            return (int) $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s AND chain_id = %d",
+                $userId,
+                $walletAddress,
+                $chainId
+            ));
+        }
+
+        // Fallback for callers that don't have chain context (backward compat).
         return (int) $wpdb->query($wpdb->prepare(
             "DELETE FROM {$table} WHERE user_id = %d AND wallet_address = %s",
             $userId,
