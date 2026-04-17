@@ -13,13 +13,14 @@ class SignalRepository
 {
     /** @var string Explicit column list — must match schema (install_own_table). */
     private const COLUMNS = 'id, user_id, wallet_address, chain, wallet_age_days, first_tx_at,
-                 tx_count, contract_count, score_contribution, raw_data, fetched_at';
+                 tx_count, contract_count, score_contribution, raw_data, fetched_at,
+                 role, trust_boost, fraud_reduction, contract_address, meta, last_synced';
 
     /** @var string Object-cache group. */
     private const CACHE_GROUP = 'bcc_onchain_signals';
 
-    /** @var int Default TTL in seconds (6 hours). Filterable via bcc_onchain_signal_cache_ttl. */
-    private const DEFAULT_TTL = 6 * HOUR_IN_SECONDS;
+    /** @var int Default TTL in seconds (1 hour). Filterable via bcc_onchain_signal_cache_ttl. */
+    private const DEFAULT_TTL = HOUR_IN_SECONDS;
 
     public static function table(): string
     {
@@ -47,20 +48,79 @@ class SignalRepository
             score_contribution FLOAT         NOT NULL DEFAULT 0,
             raw_data         LONGTEXT                 DEFAULT NULL,
             fetched_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            role             VARCHAR(20)     NOT NULL DEFAULT 'pending',
+            trust_boost      FLOAT           NOT NULL DEFAULT 0,
+            fraud_reduction  INT             NOT NULL DEFAULT 0,
+            contract_address VARCHAR(128)             DEFAULT NULL,
+            meta             TEXT                     DEFAULT NULL,
+            last_synced      DATETIME                 DEFAULT NULL,
             PRIMARY KEY (id),
             UNIQUE KEY uq_wallet_chain (wallet_address(191), chain),
-            INDEX idx_user (user_id)
+            INDEX idx_user (user_id),
+            INDEX idx_trust_boost (trust_boost)
         ) {$charset};";
 
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta($sql);
+
+        // Migration: add trust-engine columns to existing tables.
+        // dbDelta handles adding new columns, but verify the role column
+        // exists as a canary — if it doesn't, the ALTER failed silently.
+        $has_role = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS
+             WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'role'",
+            $table
+        ));
+        if (!$has_role) {
+            $wpdb->query("ALTER TABLE {$table}
+                ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'pending' AFTER fetched_at,
+                ADD COLUMN trust_boost FLOAT NOT NULL DEFAULT 0 AFTER role,
+                ADD COLUMN fraud_reduction INT NOT NULL DEFAULT 0 AFTER trust_boost,
+                ADD COLUMN contract_address VARCHAR(128) DEFAULT NULL AFTER fraud_reduction,
+                ADD COLUMN meta TEXT DEFAULT NULL AFTER contract_address,
+                ADD COLUMN last_synced DATETIME DEFAULT NULL AFTER meta");
+        }
+
+        // Add trust_boost index if missing.
+        $has_idx = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM information_schema.STATISTICS
+             WHERE table_schema = DATABASE() AND table_name = %s AND index_name = 'idx_trust_boost'",
+            $table
+        ));
+        if (!$has_idx) {
+            $wpdb->query("ALTER TABLE {$table} ADD INDEX idx_trust_boost (trust_boost)");
+        }
     }
 
     /** @param array<string, mixed> $data */
     public static function upsert(array $data): void
     {
+        // Range-validate numeric fields from blockchain APIs.
+        // Corrupted/malicious API responses returning negative or astronomically
+        // large values would corrupt onchain_bonus and downstream trust scores.
+        $score = (float) ($data['score_contribution'] ?? 0);
+        if ($score < 0 || $score > 100 || !is_finite($score)) {
+            \BCC\Core\Log\Logger::warning('[Onchain] Invalid score_contribution rejected', [
+                'wallet'  => $data['wallet_address'] ?? 'unknown',
+                'chain'   => $data['chain'] ?? 'unknown',
+                'value'   => $data['score_contribution'] ?? null,
+                'clamped' => true,
+            ]);
+            $data['score_contribution'] = max(0, min(100, is_finite($score) ? $score : 0));
+        }
+
+        $data['tx_count']       = max(0, (int) ($data['tx_count'] ?? 0));
+        $data['contract_count'] = max(0, (int) ($data['contract_count'] ?? 0));
+        $data['wallet_age_days'] = max(0, (int) ($data['wallet_age_days'] ?? 0));
+
         global $wpdb;
-        $table = self::table();
+        $table  = self::table();
+        $userId = (int) $data['user_id'];
+
+        // Invalidate BEFORE the write so any concurrent reader that misses
+        // the cache will query the DB and see the new (or in-flight) data
+        // rather than re-caching a stale snapshot.
+        self::invalidateUser($userId);
 
         // VALUES() is deprecated in MySQL 8.0.20+ but MariaDB does not support
         // the replacement AS-alias syntax. Since WordPress supports both MySQL
@@ -78,7 +138,7 @@ class SignalRepository
                 score_contribution = VALUES(score_contribution),
                 raw_data = VALUES(raw_data),
                 fetched_at = NOW()",
-            $data['user_id'],
+            $userId,
             $data['wallet_address'],
             $data['chain'],
             $data['wallet_age_days'],
@@ -92,7 +152,9 @@ class SignalRepository
         if ($result === false) {
             \BCC\Core\Log\Logger::error('[Onchain] Upsert failed for ' . $data['wallet_address'] . ' on ' . $data['chain'] . ': ' . $wpdb->last_error);
         } else {
-            self::invalidateUser((int) $data['user_id']);
+            // Invalidate again after the write to catch any reader that
+            // re-cached stale data between the pre-invalidation and commit.
+            self::invalidateUser($userId);
         }
     }
 
@@ -224,6 +286,214 @@ class SignalRepository
         ));
 
         return max(0, (int) $deleted);
+    }
+
+    // ── Trust-signal write/read methods ─────────────────────────────────
+    // These methods mirror the former WalletSignalRepository interface.
+    // Trust-engine calls these via the WalletSignalWriteInterface contract.
+
+    /**
+     * Upsert trust-scoring columns for a wallet signal row.
+     *
+     * If a row already exists for (wallet_address, chain), updates the trust
+     * columns. Otherwise inserts a minimal row with the trust columns set.
+     */
+    public static function upsertTrustSignal(
+        int    $userId,
+        string $chain,
+        string $walletAddress,
+        string $role,
+        float  $trustBoost,
+        int    $fraudReduction,
+        string $contractAddress = '',
+        array  $extra = []
+    ): void {
+        global $wpdb;
+        $table = self::table();
+
+        $meta = wp_json_encode(array_merge($extra, [
+            'verified_at' => current_time('mysql', true),
+        ]));
+
+        self::invalidateUser($userId);
+
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$table}
+                (user_id, wallet_address, chain, role, trust_boost, fraud_reduction, contract_address, meta, last_synced, fetched_at)
+             VALUES (%d, %s, %s, %s, %f, %d, %s, %s, %s, NOW())
+             ON DUPLICATE KEY UPDATE
+               user_id          = VALUES(user_id),
+               role             = VALUES(role),
+               trust_boost      = VALUES(trust_boost),
+               fraud_reduction  = VALUES(fraud_reduction),
+               contract_address = VALUES(contract_address),
+               meta             = VALUES(meta),
+               last_synced      = VALUES(last_synced)",
+            $userId,
+            $walletAddress,
+            $chain,
+            $role,
+            $trustBoost,
+            $fraudReduction,
+            $contractAddress ?: null,
+            $meta,
+            current_time('mysql', true)
+        ));
+
+        self::invalidateUser($userId);
+    }
+
+    /**
+     * Save NFT collection metadata and recalculated trust boost for a wallet.
+     *
+     * @param list<array<string, mixed>> $collections
+     */
+    public static function saveCollections(
+        int    $userId,
+        string $chain,
+        string $walletAddress,
+        array  $collections,
+        float  $trustBoost
+    ): void {
+        global $wpdb;
+        $table = self::table();
+
+        $existing = $wpdb->get_row($wpdb->prepare(
+            "SELECT id, meta FROM {$table}
+             WHERE wallet_address = %s AND chain = %s LIMIT 1",
+            $walletAddress,
+            $chain
+        ));
+
+        if (!$existing) {
+            return;
+        }
+
+        $decoded = json_decode($existing->meta ?: '{}', true) ?: [];
+        $decoded['nft_collections'] = $collections;
+        $decoded['nft_updated_at']  = current_time('mysql', true);
+
+        $wpdb->update(
+            $table,
+            [
+                'trust_boost' => $trustBoost,
+                'meta'        => wp_json_encode($decoded),
+                'last_synced' => current_time('mysql', true),
+            ],
+            ['id' => (int) $existing->id]
+        );
+
+        self::invalidateUser($userId);
+    }
+
+    /**
+     * Get trust-signal row for a single chain+wallet, with decoded meta.
+     *
+     * @return object|null
+     */
+    public static function getTrustSignalForUserChain(int $userId, string $chain): ?object
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT wallet_address, chain, role, trust_boost, fraud_reduction,
+                    contract_address, meta, last_synced
+             FROM {$table}
+             WHERE user_id = %d AND chain = %s
+             LIMIT 1",
+            $userId,
+            $chain
+        ));
+
+        if (!$row) {
+            return null;
+        }
+
+        $decoded = json_decode($row->meta ?: '{}', true) ?: [];
+        $row->nft_collections = $decoded['nft_collections'] ?? [];
+        $row->wallet_role     = $decoded['role'] ?? $row->role;
+
+        return $row;
+    }
+
+    /**
+     * Get all trust-signal rows for a user, keyed by chain name.
+     *
+     * @return array<string, object>
+     */
+    public static function getAllTrustSignalsForUser(int $userId): array
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT wallet_address, chain, role, trust_boost, fraud_reduction,
+                    contract_address, meta, last_synced
+             FROM {$table}
+             WHERE user_id = %d AND role != 'pending'",
+            $userId
+        ));
+
+        if (!is_array($rows)) {
+            return [];
+        }
+
+        $signals = [];
+        foreach ($rows as $row) {
+            $decoded = json_decode($row->meta ?: '{}', true) ?: [];
+            $row->nft_collections = $decoded['nft_collections'] ?? [];
+            $row->wallet_role     = $row->role;
+            $signals[$row->chain] = $row;
+        }
+
+        return $signals;
+    }
+
+    /**
+     * Zero out trust scoring for a disconnected wallet.
+     */
+    public static function disconnectTrustSignal(int $userId, string $chain): void
+    {
+        global $wpdb;
+        $table = self::table();
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table}
+             SET role = 'none', trust_boost = 0, fraud_reduction = 0,
+                 last_synced = %s
+             WHERE user_id = %d AND chain = %s",
+            current_time('mysql', true),
+            $userId,
+            $chain
+        ));
+
+        self::invalidateUser($userId);
+    }
+
+    /**
+     * Sum trust_boost across all chains for a user.
+     */
+    public static function getTotalTrustBoost(int $userId): float
+    {
+        global $wpdb;
+        $table = self::table();
+
+        return (float) $wpdb->get_var($wpdb->prepare(
+            "SELECT COALESCE(SUM(trust_boost), 0) FROM {$table} WHERE user_id = %d",
+            $userId
+        ));
+    }
+
+    /**
+     * Delete all signal rows for a user (full account cleanup).
+     */
+    public static function deleteForUser(int $userId): void
+    {
+        global $wpdb;
+        $table = self::table();
+        $wpdb->delete($table, ['user_id' => $userId], ['%d']);
+        self::invalidateUser($userId);
     }
 
     private static function ttl(): int

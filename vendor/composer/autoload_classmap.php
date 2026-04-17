@@ -39,6 +39,7 @@ return array(
     'BCC\\Onchain\\Services\\WalletLinkReadService' => $baseDir . '/app/Services/WalletLinkReadService.php',
     'BCC\\Onchain\\Services\\WalletLinkWriteService' => $baseDir . '/app/Services/WalletLinkWriteService.php',
     'BCC\\Onchain\\Services\\WalletSeedService' => $baseDir . '/app/Services/WalletSeedService.php',
+    'BCC\\Onchain\\Services\\WalletSignalWriteService' => $baseDir . '/app/Services/WalletSignalWriteService.php',
     'BCC\\Onchain\\Support\\ApiRetry' => $baseDir . '/app/Support/ApiRetry.php',
     'BCC\\Onchain\\Support\\Bech32' => $baseDir . '/app/Support/Bech32.php',
     'BCC\\Onchain\\Support\\ChainSupport' => $baseDir . '/app/Support/ChainSupport.php',

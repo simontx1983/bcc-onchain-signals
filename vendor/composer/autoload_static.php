@@ -92,6 +92,7 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         'BCC\\Onchain\\Services\\WalletLinkReadService' => __DIR__ . '/../..' . '/app/Services/WalletLinkReadService.php',
         'BCC\\Onchain\\Services\\WalletLinkWriteService' => __DIR__ . '/../..' . '/app/Services/WalletLinkWriteService.php',
         'BCC\\Onchain\\Services\\WalletSeedService' => __DIR__ . '/../..' . '/app/Services/WalletSeedService.php',
+        'BCC\\Onchain\\Services\\WalletSignalWriteService' => __DIR__ . '/../..' . '/app/Services/WalletSignalWriteService.php',
         'BCC\\Onchain\\Support\\ApiRetry' => __DIR__ . '/../..' . '/app/Support/ApiRetry.php',
         'BCC\\Onchain\\Support\\Bech32' => __DIR__ . '/../..' . '/app/Support/Bech32.php',
         'BCC\\Onchain\\Support\\ChainSupport' => __DIR__ . '/../..' . '/app/Support/ChainSupport.php',

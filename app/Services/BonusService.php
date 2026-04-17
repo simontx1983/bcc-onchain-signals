@@ -3,6 +3,7 @@
 namespace BCC\Onchain\Services;
 
 use BCC\Onchain\Repositories\ClaimRepository;
+use BCC\Onchain\Repositories\LockRepository;
 use BCC\Onchain\Repositories\CollectionRepository;
 use BCC\Onchain\Repositories\SignalRepository;
 use BCC\Onchain\Repositories\ValidatorRepository;
@@ -80,18 +81,7 @@ final class BonusService
         // (from other wallets the user still has connected).
         $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
         if ($pageId) {
-            $signalBonus = array_sum(array_column(
-                SignalRepository::get_for_page($pageId),
-                'score_contribution'
-            ));
-            $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
-            $claimBonus  = \BCC\Onchain\Repositories\ClaimRepository::computePageClaimBonus(
-                $walletTable,
-                $pageId,
-                $userId
-            );
-            $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-            self::applyBonus($pageId, $totalBonus);
+            self::recomputeAndApply($pageId, $userId);
         }
 
         if ($deleted && class_exists('BCC\\Core\\Log\\Logger')) {
@@ -102,11 +92,64 @@ final class BonusService
     }
 
     /**
+     * Acquire a MySQL named lock to serialize bonus recomputation per page.
+     *
+     * Returns true if the lock was acquired, false on timeout. The caller
+     * MUST call releaseBonusLock() when done (use try/finally).
+     */
+    private static function acquireBonusLock(int $pageId, int $timeoutSeconds = 5): bool
+    {
+        return LockRepository::acquire('bcc_onchain_bonus_' . $pageId, $timeoutSeconds);
+    }
+
+    private static function releaseBonusLock(int $pageId): void
+    {
+        LockRepository::release('bcc_onchain_bonus_' . $pageId);
+    }
+
+    /**
+     * Recompute and apply the full on-chain bonus for a page.
+     *
+     * Serialized via MySQL named lock to prevent concurrent recomputations
+     * from overwriting each other with stale snapshots.
+     */
+    private static function recomputeAndApply(int $pageId, int $userId): void
+    {
+        $locked = self::acquireBonusLock($pageId);
+        if (!$locked) {
+            BonusRetryService::queue($pageId, 0.0);
+            return;
+        }
+
+        try {
+            $signalBonus = array_sum(array_column(
+                SignalRepository::get_for_page($pageId),
+                'score_contribution'
+            ));
+
+            $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
+            $claimBonus  = ClaimRepository::computePageClaimBonus(
+                $walletTable,
+                $pageId,
+                $userId
+            );
+
+            $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+            self::applyBonus($pageId, $totalBonus);
+        } finally {
+            self::releaseBonusLock($pageId);
+        }
+    }
+
+    /**
      * Apply a trust bonus when an on-chain claim is verified.
      *
      * Recomputes the TOTAL bonus (signals + all verified claims) for the page,
      * then applies via applyBonus(). This avoids overwriting — applyBonus does
      * SET not ADD, so we always pass the full combined value.
+     *
+     * Serialized per-page via MySQL GET_LOCK to prevent concurrent claim
+     * verifications from reading stale snapshots and overwriting each other.
      *
      * Hooked to: bcc_onchain_claim_verified
      */
@@ -121,8 +164,6 @@ final class BonusService
             ? ValidatorRepository::table()
             : CollectionRepository::table();
 
-        $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
-
         // Resolve page_id: entity → wallet_link → post_id.
         $pageId = \BCC\Onchain\Repositories\WalletRepository::getPostIdForEntity($entityTable, $entityId);
 
@@ -135,20 +176,6 @@ final class BonusService
             return;
         }
 
-        // Recompute full bonus: signal scores + ALL claim bonuses (validators + collections).
-        $signalBonus = array_sum(array_column(
-            SignalRepository::get_for_page($pageId),
-            'score_contribution'
-        ));
-
-        $totalClaimBonus = ClaimRepository::computePageClaimBonus(
-            $walletTable,
-            $pageId,
-            $userId
-        );
-
-        $totalBonus = min($signalBonus + $totalClaimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-
-        self::applyBonus($pageId, $totalBonus);
+        self::recomputeAndApply($pageId, $userId);
     }
 }

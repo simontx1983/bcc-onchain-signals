@@ -230,6 +230,13 @@ add_action('plugins_loaded', function (): void {
         return new \BCC\Onchain\Services\WalletLinkWriteService();
     });
 
+    add_filter('bcc.resolve.wallet_signal_write', function ($service = null) {
+        if ($service instanceof \BCC\Core\Contracts\WalletSignalWriteInterface) {
+            return $service;
+        }
+        return new \BCC\Onchain\Services\WalletSignalWriteService();
+    });
+
     add_filter('bcc.resolve.onchain_data_read', function ($service = null) {
         if ($service instanceof \BCC\Core\Contracts\OnchainDataReadInterface) {
             return $service;
@@ -292,6 +299,21 @@ add_action('plugins_loaded', function (): void {
             }
         }
     }, 10, 3);
+
+    // ── User deletion: clean up wallet links, signals, and claims ─────────
+    add_action('delete_user', function (int $userId): void {
+        // Delete wallet links (user_id is the owner).
+        global $wpdb;
+        $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
+        $wpdb->delete($walletTable, ['user_id' => $userId], ['%d']);
+
+        // Delete onchain signals (raw metrics + trust scoring data).
+        \BCC\Onchain\Repositories\SignalRepository::deleteForUser($userId);
+
+        // Delete entity claims.
+        $claimTable = \BCC\Onchain\Repositories\ClaimRepository::table();
+        $wpdb->delete($claimTable, ['user_id' => $userId], ['%d']);
+    }, 10, 1);
 
     // ── REST API ────────────────────────────────────────────────────────────
     add_action('rest_api_init', [SignalController::class, 'registerRoutes']);

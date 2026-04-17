@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Core\ServiceLocator;
+use BCC\Onchain\Repositories\LockRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -141,13 +142,10 @@ class SignalFetcher
      */
     private static function recordChainHealth(string $chain, bool $success): void
     {
-        global $wpdb;
-
         // Advisory lock prevents concurrent cron processes from overwriting
         // each other's failure counts during the read-modify-write cycle.
         $lockName = 'bcc_health_' . $chain;
-        $gotLock  = (int) $wpdb->get_var($wpdb->prepare("SELECT GET_LOCK(%s, 0)", $lockName));
-        if (!$gotLock) {
+        if (!LockRepository::acquire($lockName, 0)) {
             return; // Another process is updating health; skip
         }
 
@@ -182,7 +180,7 @@ class SignalFetcher
 
             update_option($optionKey, $health, false);
         } finally {
-            $wpdb->get_var($wpdb->prepare("SELECT RELEASE_LOCK(%s)", $lockName));
+            LockRepository::release($lockName);
         }
     }
 

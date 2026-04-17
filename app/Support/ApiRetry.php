@@ -115,9 +115,11 @@ final class ApiRetry
                     }
 
                     if ($attempt < $maxRetries) {
-                        // Cap at 2s to prevent cron timeout; circuit breaker
-                        // handles longer outages at the chain level.
-                        sleep(min(2, self::backoffDelay($attempt)));
+                        // Use full exponential backoff for 5xx errors.
+                        // The 2s cap was causing premature circuit-breaker trips
+                        // on APIs that need longer recovery windows.
+                        $delay = min(self::DEFAULT_BACKOFF_MAX, self::backoffDelay($attempt));
+                        sleep($delay);
                         $attempt++;
                         continue;
                     }
@@ -149,7 +151,8 @@ final class ApiRetry
             }
 
             if ($attempt < $maxRetries) {
-                sleep(min(2, self::backoffDelay($attempt)));
+                $delay = min(self::DEFAULT_BACKOFF_MAX, self::backoffDelay($attempt));
+                sleep($delay);
                 $attempt++;
                 continue;
             }
