@@ -47,7 +47,7 @@ define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 // ageScore max=8, depthScore max=7, contractScore max=8*0.6=4.8 → total ~20
 define('BCC_ONCHAIN_MAX_AGE_SCORE',       8);
 define('BCC_ONCHAIN_MAX_DEPTH_SCORE',     7);
-define('BCC_ONCHAIN_MAX_CONTRACT_SCORE',  5);
+define('BCC_ONCHAIN_MAX_CONTRACT_SCORE',  4.8);
 define('BCC_ONCHAIN_CACHE_HOURS',        24);
 
 // Total on-chain bonus cap per page, across all wallets and chains.
