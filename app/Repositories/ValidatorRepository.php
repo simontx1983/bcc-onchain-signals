@@ -200,6 +200,12 @@ final class ValidatorRepository
 
         $stats['total'] = count($validators);
 
+        // Wrap all writes in a transaction so a PHP timeout mid-batch
+        // rolls back cleanly instead of leaving partial state.
+        $wpdb->query('START TRANSACTION');
+
+        try {
+
         // Collect IDs of unchanged rows whose fetched_at is stale (>6h).
         // These get a single batch UPDATE at the end instead of N individual writes.
         $staleFetchedIds = [];
@@ -320,6 +326,13 @@ final class ValidatorRepository
                 ));
             }
             $stats['refreshed'] = count($staleFetchedIds);
+        }
+
+        $wpdb->query('COMMIT');
+
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            throw $e;
         }
 
         return $stats;

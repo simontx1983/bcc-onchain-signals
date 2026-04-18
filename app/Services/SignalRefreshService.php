@@ -71,9 +71,9 @@ final class SignalRefreshService
         }
 
         if (!empty($results)) {
-            $totalBonus = array_sum(array_column($results, 'score_contribution'));
-            $totalBonus = min($totalBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-            BonusService::applyBonus($pageId, $totalBonus);
+            // Use recomputeAndApply() which holds the per-page advisory lock,
+            // preventing TOCTOU races where concurrent writes overwrite each other.
+            BonusService::recomputeAndApply($pageId, $ownerId);
         }
 
         return $results;
@@ -108,11 +108,10 @@ final class SignalRefreshService
 
         // Recalculate total bonus from all wallets for this page.
         // Skip bonus recalculation when called without a real page (e.g. seed before page exists).
+        // Use recomputeAndApply() which holds the per-page advisory lock,
+        // preventing TOCTOU races where concurrent writes overwrite each other.
         if ($pageId > 0) {
-            $allSignals = SignalRepository::get_for_page($pageId);
-            $totalBonus = array_sum(array_column($allSignals, 'score_contribution'));
-            $totalBonus = min($totalBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-            BonusService::applyBonus($pageId, $totalBonus);
+            BonusService::recomputeAndApply($pageId, $userId);
         }
 
         return $row;
@@ -169,6 +168,16 @@ final class SignalRefreshService
      */
     public static function processBatch(): void
     {
+        // Acquire advisory lock to prevent overlapping batch runs from
+        // concurrent continuation events.
+        if (!\BCC\Onchain\Repositories\LockRepository::acquire('bcc_onchain_refresh_batch', 0)) {
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::info('[SignalRefresh] processBatch lock held — skipping to avoid overlap');
+            }
+            return;
+        }
+
+        try {
         $startTime    = time();
         $startTimeMic = microtime(true);
         // Use wp_option (persistent) instead of transient for the batch
@@ -229,6 +238,10 @@ final class SignalRefreshService
         } else {
             // All pages processed — clean up cursor.
             delete_option('bcc_onchain_refresh_offset');
+        }
+
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release('bcc_onchain_refresh_batch');
         }
     }
 

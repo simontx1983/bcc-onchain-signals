@@ -113,7 +113,7 @@ final class BonusService
      * Serialized via MySQL named lock to prevent concurrent recomputations
      * from overwriting each other with stale snapshots.
      */
-    private static function recomputeAndApply(int $pageId, int $userId): void
+    public static function recomputeAndApply(int $pageId, int $userId): void
     {
         $locked = self::acquireBonusLock($pageId);
         if (!$locked) {

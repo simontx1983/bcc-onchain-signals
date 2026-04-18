@@ -251,12 +251,14 @@ add_action('plugins_loaded', function (): void {
     WalletController::init();
 
     // ── Redact API keys from WordPress http_api_debug logs ───────────────
+    // Priority 1: redact API keys before any other http_api_debug handler
+    // can see the full URL. Default priority (10) leaked keys to earlier hooks.
     add_action('http_api_debug', function ($response, $context, $transport, $args, $url): void {
         // If the URL contains an API key, redact it before any downstream logging
         if (is_string($url) && strpos($url, 'apikey=') !== false) {
             $url = preg_replace('/apikey=[^&]+/', 'apikey=REDACTED', $url);
         }
-    }, 10, 5);
+    }, 1, 5);
 
     // ── Cron hooks ──────────────────────────────────────────────────────────
     add_action('bcc_onchain_daily_refresh',  [SignalRefreshService::class, 'dailyRefresh']);
