@@ -10,10 +10,6 @@ if (!defined('ABSPATH')) {
 
 final class WalletRepository
 {
-    /** @var string Explicit column list — must match schema-wallets.php. */
-    private const COLUMNS = 'id, user_id, post_id, wallet_address, chain_id, wallet_type,
-                 label, verified_at, is_primary, created_at';
-
     public static function table(): string
     {
         return DB::table('wallet_links');

@@ -114,15 +114,9 @@ final class ApiRetry
                         CircuitBreaker::recordFailure($chainId);
                     }
 
-                    if ($attempt < $maxRetries) {
-                        // Use full exponential backoff for 5xx errors.
-                        // The 2s cap was causing premature circuit-breaker trips
-                        // on APIs that need longer recovery windows.
-                        $delay = min(self::DEFAULT_BACKOFF_MAX, self::backoffDelay($attempt));
-                        sleep($delay);
-                        $attempt++;
-                        continue;
-                    }
+                    // Do NOT sleep — return immediately. The markFailure() path
+                    // already writes retry_after to the DB, which is the backoff
+                    // mechanism. Sleeping in a cron loop can exceed PHP max_execution_time.
                     return $lastResponse;
                 }
 
@@ -150,13 +144,9 @@ final class ApiRetry
                 CircuitBreaker::recordFailure($chainId);
             }
 
-            if ($attempt < $maxRetries) {
-                $delay = min(self::DEFAULT_BACKOFF_MAX, self::backoffDelay($attempt));
-                sleep($delay);
-                $attempt++;
-                continue;
-            }
-
+            // Do NOT sleep — return immediately. The caller's retry_after
+            // DB column is the backoff mechanism. Sleeping blocks the PHP
+            // process for up to 90s in cron context, risking timeout kills.
             break;
         }
 
@@ -368,20 +358,6 @@ final class ApiRetry
     }
 
     // ── Internal ────────────────────────────────────────────────────────────
-
-    /**
-     * Calculate backoff delay for a given attempt number.
-     * Formula: min(BACKOFF_MAX, BACKOFF_BASE * MULTIPLIER^attempt)
-     *
-     * Attempt 0 → 2s
-     * Attempt 1 → 5s
-     * Attempt 2 → 12.5s → capped at 30s
-     */
-    private static function backoffDelay(int $attempt): int
-    {
-        $delay = self::DEFAULT_BACKOFF_BASE * pow(self::BACKOFF_MULTIPLIER, $attempt);
-        return (int) min(self::DEFAULT_BACKOFF_MAX, $delay);
-    }
 
     /**
      * Parse the Retry-After header from a 429 response.

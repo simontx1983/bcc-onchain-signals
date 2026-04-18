@@ -297,6 +297,8 @@ class SignalRepository
      *
      * If a row already exists for (wallet_address, chain), updates the trust
      * columns. Otherwise inserts a minimal row with the trust columns set.
+     *
+     * @param array<string, mixed> $extra
      */
     public static function upsertTrustSignal(
         int    $userId,

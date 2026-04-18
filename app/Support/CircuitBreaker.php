@@ -123,9 +123,9 @@ final class CircuitBreaker
                 $ageDays  = floor($ageSec / DAY_IN_SECONDS);
                 $ageHours = floor(($ageSec % DAY_IN_SECONDS) / HOUR_IN_SECONDS);
                 if ($ageDays > 0) {
-                    $ageHuman = sprintf('last success: %d day%s ago', $ageDays, $ageDays === 1 ? '' : 's');
+                    $ageHuman = sprintf('last success: %d day%s ago', $ageDays, (int) $ageDays === 1 ? '' : 's');
                 } else {
-                    $ageHuman = sprintf('last success: %d hour%s ago', $ageHours, $ageHours === 1 ? '' : 's');
+                    $ageHuman = sprintf('last success: %d hour%s ago', $ageHours, (int) $ageHours === 1 ? '' : 's');
                 }
             }
 

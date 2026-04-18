@@ -32,12 +32,6 @@ class ClaimService {
     /** @var string[] Valid entity types. */
     private const ENTITY_TYPES = ['validator', 'collection'];
 
-    /** @var array<string, string[]> Valid claim roles per entity type. */
-    private const VALID_ROLES = [
-        'validator'  => ['operator'],
-        'collection' => ['creator', 'holder'],
-    ];
-
     /**
      * Exclusive roles — only ONE verified claim allowed per entity.
      * Holders are unlimited. Operators/creators are exclusive.

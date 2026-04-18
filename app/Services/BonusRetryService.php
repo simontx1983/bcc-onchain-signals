@@ -213,15 +213,25 @@ final class BonusRetryService
      */
     private static function quarantine(int $pageId, array $entry): void
     {
-        /** @var array<int, array{bonus: float, queued_at: int, attempts: int, quarantined_at: int}> $quarantined */
-        $quarantined = get_option(self::QUARANTINE_KEY, []);
-        $quarantined[$pageId] = [
-            'bonus'          => $entry['bonus'] ?? 0.0,
-            'queued_at'      => $entry['queued_at'] ?? 0,
-            'attempts'       => $entry['attempts'] ?? 0,
-            'quarantined_at' => time(),
-        ];
-        update_option(self::QUARANTINE_KEY, $quarantined, false);
+        // Acquire advisory lock to prevent concurrent get_option + update_option
+        // from losing entries under concurrency (lost-update race).
+        if (!\BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+            return; // Will be retried next cycle.
+        }
+
+        try {
+            /** @var array<int, array{bonus: float, queued_at: int, attempts: int, quarantined_at: int}> $quarantined */
+            $quarantined = get_option(self::QUARANTINE_KEY, []);
+            $quarantined[$pageId] = [
+                'bonus'          => $entry['bonus'] ?? 0.0,
+                'queued_at'      => $entry['queued_at'] ?? 0,
+                'attempts'       => $entry['attempts'] ?? 0,
+                'quarantined_at' => time(),
+            ];
+            update_option(self::QUARANTINE_KEY, $quarantined, false);
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
+        }
     }
 
     /**
@@ -241,12 +251,12 @@ final class BonusRetryService
         $cutoff  = time() - (14 * DAY_IN_SECONDS);
         $pruned  = array_filter(
             $quarantined,
-            static fn(array $entry): bool => ($entry['quarantined_at'] ?? 0) >= $cutoff
+            static fn(array $entry): bool => $entry['quarantined_at'] >= $cutoff
         );
 
         // Cap at 100 entries — keep the most recent by quarantined_at.
         if (count($pruned) > 100) {
-            uasort($pruned, static fn(array $a, array $b): int => ($b['quarantined_at'] ?? 0) <=> ($a['quarantined_at'] ?? 0));
+            uasort($pruned, static fn(array $a, array $b): int => $b['quarantined_at'] <=> $a['quarantined_at']);
             $pruned = array_slice($pruned, 0, 100, true);
         }
 
