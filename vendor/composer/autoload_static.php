@@ -7,6 +7,7 @@ namespace Composer\Autoload;
 class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
 {
     public static $files = array (
+        '9b38cf48e83f5d8f60375221cd213eee' => __DIR__ . '/..' . '/phpstan/phpstan/bootstrap.php',
         '0e6d7bf4a5811bfa5cf40c5ccd6fae6a' => __DIR__ . '/..' . '/symfony/polyfill-mbstring/bootstrap.php',
     );
 
@@ -17,6 +18,7 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         ),
         'S' =>
         array (
+            'SzepeViktor\\PHPStan\\WordPress\\' => 30,
             'Symfony\\Polyfill\\Mbstring\\' => 26,
         ),
         'E' =>
@@ -35,6 +37,10 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         'kornrunner\\' =>
         array (
             0 => __DIR__ . '/..' . '/kornrunner/keccak/src',
+        ),
+        'SzepeViktor\\PHPStan\\WordPress\\' =>
+        array (
+            0 => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src',
         ),
         'Symfony\\Polyfill\\Mbstring\\' =>
         array (
@@ -121,6 +127,21 @@ class ComposerStaticInitb605bab1adf88a48da10186ad80d511f
         'Elliptic\\HmacDRBG' => __DIR__ . '/..' . '/simplito/elliptic-php/lib/HmacDRBG.php',
         'Elliptic\\Utils' => __DIR__ . '/..' . '/simplito/elliptic-php/lib/Utils.php',
         'Symfony\\Polyfill\\Mbstring\\Mbstring' => __DIR__ . '/..' . '/symfony/polyfill-mbstring/Mbstring.php',
+        'SzepeViktor\\PHPStan\\WordPress\\ApplyFiltersDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/ApplyFiltersDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\AssertWpErrorTypeSpecifyingExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/AssertWpErrorTypeSpecifyingExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\EscSqlDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/EscSqlDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookCallbackRule' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookCallbackRule.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookDocBlock' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookDocBlock.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookDocsRule' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookDocsRule.php',
+        'SzepeViktor\\PHPStan\\WordPress\\HookDocsVisitor' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/HookDocsVisitor.php',
+        'SzepeViktor\\PHPStan\\WordPress\\NormalizeWhitespaceDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/NormalizeWhitespaceDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\NormalizedArguments' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/NormalizedArguments.php',
+        'SzepeViktor\\PHPStan\\WordPress\\ShortcodeAttsDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/ShortcodeAttsDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\SlashitFunctionsDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/SlashitFunctionsDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\StripslashesFromStringsOnlyDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/StripslashesFromStringsOnlyDynamicFunctionReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\WpConstantFetchRule' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/WpConstantFetchRule.php',
+        'SzepeViktor\\PHPStan\\WordPress\\WpParseUrlFunctionDynamicReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/WpParseUrlFunctionDynamicReturnTypeExtension.php',
+        'SzepeViktor\\PHPStan\\WordPress\\WpSlashDynamicFunctionReturnTypeExtension' => __DIR__ . '/..' . '/szepeviktor/phpstan-wordpress/src/WpSlashDynamicFunctionReturnTypeExtension.php',
         'kornrunner\\Keccak' => __DIR__ . '/..' . '/kornrunner/keccak/src/Keccak.php',
     );
 

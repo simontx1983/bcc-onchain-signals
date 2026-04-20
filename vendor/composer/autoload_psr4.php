@@ -7,6 +7,7 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'kornrunner\\' => array($vendorDir . '/kornrunner/keccak/src'),
+    'SzepeViktor\\PHPStan\\WordPress\\' => array($vendorDir . '/szepeviktor/phpstan-wordpress/src'),
     'Symfony\\Polyfill\\Mbstring\\' => array($vendorDir . '/symfony/polyfill-mbstring'),
     'Elliptic\\' => array($vendorDir . '/simplito/elliptic-php/lib'),
     'BN\\' => array($vendorDir . '/simplito/bn-php/lib'),
