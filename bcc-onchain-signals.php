@@ -274,7 +274,11 @@ add_action('plugins_loaded', function (): void {
     // Schedule wallet seed as async cron event — external API calls (Etherscan, etc.)
     // must not block the wallet-verify AJAX response (10s+ timeout per chain).
     add_action('bcc_wallet_verified', function (int $userId, string $chain, string $address): void {
-        wp_schedule_single_event(time(), 'bcc_onchain_seed_wallet', [$userId, $chain, $address]);
+        \BCC\Core\Cron\AsyncDispatcher::enqueueAsync(
+            'bcc_onchain_seed_wallet',
+            [$userId, $chain, $address],
+            'bcc-onchain'
+        );
     }, 10, 3);
 
     add_action('bcc_onchain_seed_wallet', function (int $userId, string $chain, string $address): void {

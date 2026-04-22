@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -15,24 +16,29 @@ use BCC\Onchain\Support\ApiRetry;
  * Supports:
  *  - Validators via getVoteAccounts RPC method
  *  - NFT collections via getAssetsByOwner DAS API
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 class SolanaFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 30;
     private const SOLANA_RPC   = 'https://api.mainnet-beta.solana.com';
 
+    /** @var ChainRow */
     private object $chain;
     private string $rpc_url;
 
     /** @var array<string, array<int, array<string, mixed>>> Cached vote accounts keyed by RPC URL (per PHP process). */
     private static array $voteAccountsCache = [];
 
+    /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain   = $chain;
         $this->rpc_url = $chain->rpc_url ?? self::SOLANA_RPC;
     }
 
+    /** @return ChainRow */
     public function get_chain(): object
     {
         return $this->chain;

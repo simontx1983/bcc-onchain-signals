@@ -85,8 +85,13 @@ class Bech32
      */
     public static function encode(string $hrp, string $data): string
     {
+        $unpacked = unpack('C*', $data);
+        if ($unpacked === false) {
+            throw new \RuntimeException('Bech32::encode: unpack() failed on binary data.');
+        }
+
         $values = self::convertBits(
-            array_values(unpack('C*', $data)),
+            array_values($unpacked),
             8,
             5,
             true

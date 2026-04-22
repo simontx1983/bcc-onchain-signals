@@ -7,23 +7,14 @@ if (!defined('ABSPATH')) {
 }
 
 /**
- * MySQL advisory lock operations for bcc-onchain-signals.
+ * Onchain-flavoured handle for MySQL advisory locks.
+ *
+ * Currently a thin alias over the canonical bcc-core implementation. Add
+ * onchain-specific key-namespacing helpers here if they emerge — keep the
+ * primitive acquire/release in the parent so it stays shared.
+ *
+ * @see \BCC\Core\DB\AdvisoryLock
  */
-final class LockRepository
+final class LockRepository extends \BCC\Core\DB\AdvisoryLock
 {
-    public static function acquire(string $key, int $timeout = 0): bool
-    {
-        global $wpdb;
-        return (int) $wpdb->get_var(
-            $wpdb->prepare('SELECT GET_LOCK(%s, %d)', $key, $timeout)
-        ) === 1;
-    }
-
-    public static function release(string $key): void
-    {
-        global $wpdb;
-        $wpdb->get_var(
-            $wpdb->prepare('SELECT RELEASE_LOCK(%s)', $key)
-        );
-    }
 }

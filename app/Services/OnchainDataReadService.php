@@ -3,6 +3,7 @@
 namespace BCC\Onchain\Services;
 
 use BCC\Core\Contracts\OnchainDataReadInterface;
+use BCC\Onchain\Repositories\CollectionRepository;
 use BCC\Onchain\Repositories\ValidatorRepository;
 
 if (!defined('ABSPATH')) {
@@ -14,6 +15,8 @@ if (!defined('ABSPATH')) {
  *
  * Delegates to existing ValidatorRepository and CollectionService,
  * providing a cross-plugin contract for peepso-integration.
+ *
+ * @phpstan-import-type CollectionDisplay from CollectionRepository
  */
 final class OnchainDataReadService implements OnchainDataReadInterface
 {
@@ -51,8 +54,8 @@ final class OnchainDataReadService implements OnchainDataReadInterface
     }
 
     /**
-     * @param object[] $items
-     * @return object[]
+     * @param list<CollectionDisplay> $items
+     * @return list<\stdClass>
      */
     public function enrichCollectionsWithBadges(array $items, int $ownerId, int $viewerId = 0): array
     {
@@ -60,9 +63,9 @@ final class OnchainDataReadService implements OnchainDataReadInterface
     }
 
     /**
-     * @param object[] $onchainItems
+     * @param list<CollectionDisplay> $onchainItems
      * @param array<int, array<string, mixed>> $manualRows
-     * @return object[]
+     * @return list<\stdClass>
      */
     public function mergeCollectionsWithManual(array $onchainItems, array $manualRows): array
     {

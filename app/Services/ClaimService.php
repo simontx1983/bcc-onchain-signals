@@ -27,6 +27,28 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-import-type ValidatorIdWithChain from ValidatorRepository
+ * @phpstan-import-type CollectionIdWithChain from CollectionRepository
+ * @phpstan-import-type WalletWithChain from WalletRepository
+ *
+ * Unified entity shape consumed by matchWalletToEntity / matchValidator / matchCollection.
+ * Represents the superset of columns fetched by either
+ * ValidatorRepository::getByIdWithChain or CollectionRepository::getByIdWithChain
+ * — the mutually-exclusive fields are optional.
+ *
+ * @phpstan-type EntityForClaim object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     chain_id: string,
+ *     chain_slug: string,
+ *     chain_type: string,
+ *     operator_address?: string,
+ *     moniker?: string|null,
+ *     contract_address?: string,
+ *     collection_name?: string|null
+ * }
+ */
 class ClaimService {
 
     /** @var string[] Valid entity types. */
@@ -161,13 +183,17 @@ class ClaimService {
 
     /**
      * Load entity data by type and ID. Delegates to repository.
+     *
+     * @return EntityForClaim|null
      */
     private static function loadEntity(string $entityType, int $entityId): ?object {
         if ($entityType === 'validator') {
+            /** @var EntityForClaim|null */
             return ValidatorRepository::getByIdWithChain($entityId);
         }
 
         if ($entityType === 'collection') {
+            /** @var EntityForClaim|null */
             return CollectionRepository::getByIdWithChain($entityId);
         }
 
@@ -180,16 +206,17 @@ class ClaimService {
      * For validators: wallet's derived operator address matches validator's operator_address.
      * For collections: wallet address is the contract owner (creator) or holds tokens (holder).
      *
-     * @param object[] $wallets
+     * @param list<WalletWithChain> $wallets
+     * @param EntityForClaim $entity
      * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchWalletToEntity(array $wallets, object $entity, string $entityType): ?array {
         $entityChainId = (int) $entity->chain_id;
 
         // Filter to wallets on the same chain.
-        $chainWallets = array_filter($wallets, function ($w) use ($entityChainId) {
+        $chainWallets = array_values(array_filter($wallets, function ($w) use ($entityChainId) {
             return (int) $w->chain_id === $entityChainId;
-        });
+        }));
 
         if (empty($chainWallets)) {
             return null;
@@ -209,9 +236,9 @@ class ClaimService {
     /**
      * Match wallet to validator operator address.
      * For Cosmos: the operator address (valoper) is derived from the same key as the wallet address.
-     */
-    /**
-     * @param object[] $wallets
+     *
+     * @param list<WalletWithChain> $wallets
+     * @param EntityForClaim $entity
      * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchValidator(array $wallets, object $entity): ?array {
@@ -258,9 +285,9 @@ class ClaimService {
     /**
      * Match wallet to collection ownership via RPC.
      * Checks owner() first (creator), then balanceOf (holder).
-     */
-    /**
-     * @param object[] $wallets
+     *
+     * @param list<WalletWithChain> $wallets
+     * @param EntityForClaim $entity
      * @return array{wallet_address: string, chain_id: int, role: string}|null
      */
     private static function matchCollection(array $wallets, object $entity): ?array {
@@ -316,6 +343,9 @@ class ClaimService {
         return Bech32::decodeToBytes($bech32);
     }
 
+    /**
+     * @param EntityForClaim $entity
+     */
     private static function noMatchMessage(string $entityType, object $entity): string {
         if ($entityType === 'validator') {
             $moniker = $entity->moniker ?? 'this validator';

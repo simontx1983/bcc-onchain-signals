@@ -17,6 +17,10 @@ use BCC\Onchain\Factories\FetcherFactory;
  * Two sub-tabs:
  *  - Validators: per-chain validator refresh (existing)
  *  - NFT Collections: per-chain collection refresh (new)
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
+ * @phpstan-import-type ValidatorCountByChain from ValidatorRepository
+ * @phpstan-import-type CollectionCountByChain from CollectionRepository
  */
 class ChainsPage
 {
@@ -86,7 +90,13 @@ class ChainsPage
             $enrichHook = 'bcc_refresh_validators';
             $scheduled  = false;
             if (!wp_next_scheduled($enrichHook)) {
-                $scheduled = wp_schedule_single_event(time() + 10, $enrichHook);
+                \BCC\Core\Cron\AsyncDispatcher::scheduleSingle(
+                    time() + 10,
+                    $enrichHook,
+                    [],
+                    'bcc-onchain'
+                );
+                $scheduled = true;
             }
 
             $stats['enriched'] = 0;
@@ -195,8 +205,8 @@ class ChainsPage
     }
 
     /**
-     * @param object[] $chains
-     * @param array<int, object> $countMap
+     * @param list<ChainRow> $chains
+     * @param array<int, ValidatorCountByChain> $countMap
      */
     private static function render_validators_tab(array $chains, array $countMap, string $nonce): void
     {
@@ -271,8 +281,8 @@ class ChainsPage
     }
 
     /**
-     * @param object[] $chains
-     * @param array<int, object> $countMap
+     * @param list<ChainRow> $chains
+     * @param array<int, CollectionCountByChain> $countMap
      */
     private static function render_collections_tab(array $chains, array $countMap, string $nonce): void
     {

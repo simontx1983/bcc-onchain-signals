@@ -8,6 +8,24 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-type WalletWithChain object{
+ *     id: string,
+ *     user_id: string,
+ *     post_id: string,
+ *     wallet_address: string,
+ *     chain_id: string,
+ *     wallet_type: string,
+ *     label: string|null,
+ *     verified_at: string|null,
+ *     is_primary: string,
+ *     created_at: string,
+ *     chain_slug: string,
+ *     chain_name: string,
+ *     chain_type: string,
+ *     explorer_url: string|null
+ * }
+ */
 final class WalletRepository
 {
     public static function table(): string
@@ -127,7 +145,7 @@ final class WalletRepository
         return true;
     }
 
-    /** @return object[] */
+    /** @return list<WalletWithChain> */
     public static function getForUser(int $userId, ?string $walletType = null, bool $verifiedOnly = false): array
     {
         global $wpdb;
@@ -148,7 +166,8 @@ final class WalletRepository
 
         $whereSql = implode(' AND ', $where);
 
-        return $wpdb->get_results($wpdb->prepare(
+        /** @var list<WalletWithChain>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
                     w.label, w.verified_at, w.is_primary, w.created_at,
                     c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
@@ -158,9 +177,11 @@ final class WalletRepository
              ORDER BY w.is_primary DESC, w.created_at ASC",
             ...$args
         ));
+
+        return $rows ?: [];
     }
 
-    /** @return object[] */
+    /** @return list<WalletWithChain> */
     public static function getForProject(int $postId, ?string $walletType = null): array
     {
         global $wpdb;
@@ -177,7 +198,8 @@ final class WalletRepository
 
         $whereSql = implode(' AND ', $where);
 
-        return $wpdb->get_results($wpdb->prepare(
+        /** @var list<WalletWithChain>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
                     w.label, w.verified_at, w.is_primary, w.created_at,
                     c.slug AS chain_slug, c.name AS chain_name, c.chain_type, c.explorer_url
@@ -187,14 +209,18 @@ final class WalletRepository
              ORDER BY w.is_primary DESC, w.wallet_type ASC, w.created_at ASC",
             ...$args
         ));
+
+        return $rows ?: [];
     }
 
+    /** @return WalletWithChain|null */
     public static function getById(int $walletLinkId): ?object
     {
         global $wpdb;
         $table  = self::table();
         $chains = ChainRepository::table();
 
+        /** @var WalletWithChain|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT w.id, w.user_id, w.post_id, w.wallet_address, w.chain_id, w.wallet_type,
                     w.label, w.verified_at, w.is_primary, w.created_at,

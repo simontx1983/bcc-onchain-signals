@@ -9,6 +9,23 @@ if (!defined('ABSPATH')) {
 use BCC\Core\DB\DB;
 use BCC\Core\PeepSo\PeepSo;
 
+/**
+ * @phpstan-type TrustSignalMinimalRow object{
+ *     id: string,
+ *     meta: string|null
+ * }
+ *
+ * @phpstan-type TrustSignalRow object{
+ *     wallet_address: string,
+ *     chain: string,
+ *     role: string,
+ *     trust_boost: string,
+ *     fraud_reduction: string,
+ *     contract_address: string|null,
+ *     meta: string|null,
+ *     last_synced: string|null
+ * }
+ */
 class SignalRepository
 {
     /** @var string Explicit column list — must match schema (install_own_table). */
@@ -148,9 +165,13 @@ class SignalRepository
             $data['score_contribution'],
             isset($data['raw_data']) ? wp_json_encode($data['raw_data']) : null
         ));
+        // Snapshot last_error immediately — Logger::error below may internally
+        // touch the DB (depending on log handler), which would clobber this
+        // connection-global value before we interpolate it into the log line.
+        $lastError = (string) $wpdb->last_error;
 
         if ($result === false) {
-            \BCC\Core\Log\Logger::error('[Onchain] Upsert failed for ' . $data['wallet_address'] . ' on ' . $data['chain'] . ': ' . $wpdb->last_error);
+            \BCC\Core\Log\Logger::error('[Onchain] Upsert failed for ' . $data['wallet_address'] . ' on ' . $data['chain'] . ': ' . $lastError);
         } else {
             // Invalidate again after the write to catch any reader that
             // re-cached stale data between the pre-invalidation and commit.
@@ -360,6 +381,7 @@ class SignalRepository
         global $wpdb;
         $table = self::table();
 
+        /** @var TrustSignalMinimalRow|null $existing */
         $existing = $wpdb->get_row($wpdb->prepare(
             "SELECT id, meta FROM {$table}
              WHERE wallet_address = %s AND chain = %s LIMIT 1",
@@ -371,6 +393,7 @@ class SignalRepository
             return;
         }
 
+        /** @var array<string, mixed> $decoded */
         $decoded = json_decode($existing->meta ?: '{}', true) ?: [];
         $decoded['nft_collections'] = $collections;
         $decoded['nft_updated_at']  = current_time('mysql', true);
@@ -391,13 +414,37 @@ class SignalRepository
     /**
      * Get trust-signal row for a single chain+wallet, with decoded meta.
      *
-     * @return object|null
+     * The returned stdClass carries every column from TrustSignalRow plus two
+     * decoration props populated from the JSON `meta` blob:
+     *   ->nft_collections  list<array<array-key, mixed>>
+     *   ->wallet_role      string
+     *
+     * ⚠️ CONSUMER CONTRACT — BOTH decoration props are sourced from a JSON blob
+     * that this repository does NOT fully validate. Treat them as UNTRUSTED input
+     * and re-validate at every point where they drive logic:
+     *
+     *   • `wallet_role` may not be in the expected enum {pending, none, operator,
+     *     creator, holder, validator}. Callers performing authorization or trust
+     *     bonus math MUST check the value against an explicit allow-list before
+     *     branching on it. Do not use it as a key into a trust-weight table
+     *     without a default-deny fallback.
+     *
+     *   • `nft_collections` is a list of arrays with arbitrary keys — the shape
+     *     of each element is NOT validated. Accessing `$entry['contract_address']`
+     *     without an `isset` check can produce nulls that silently corrupt
+     *     downstream score aggregation.
+     *
+     * This is the plugin's primary future failure vector because it crosses
+     * plugin boundaries (bcc-trust-engine consumes it) and bypasses static
+     * guarantees. A shared cross-plugin DTO is the proper fix — see the note
+     * on decorateTrustSignal() for the migration direction.
      */
-    public static function getTrustSignalForUserChain(int $userId, string $chain): ?object
+    public static function getTrustSignalForUserChain(int $userId, string $chain): ?\stdClass
     {
         global $wpdb;
         $table = self::table();
 
+        /** @var TrustSignalRow|null $row */
         $row = $wpdb->get_row($wpdb->prepare(
             "SELECT wallet_address, chain, role, trust_boost, fraud_reduction,
                     contract_address, meta, last_synced
@@ -412,23 +459,24 @@ class SignalRepository
             return null;
         }
 
-        $decoded = json_decode($row->meta ?: '{}', true) ?: [];
-        $row->nft_collections = $decoded['nft_collections'] ?? [];
-        $row->wallet_role     = $decoded['role'] ?? $row->role;
-
-        return $row;
+        return self::decorateTrustSignal($row);
     }
 
     /**
      * Get all trust-signal rows for a user, keyed by chain name.
      *
-     * @return array<string, object>
+     * Each returned stdClass has the same decoration contract as
+     * getTrustSignalForUserChain() — including the ⚠️ UNTRUSTED / re-validate
+     * requirement on `wallet_role` and `nft_collections`.
+     *
+     * @return array<string, \stdClass>
      */
     public static function getAllTrustSignalsForUser(int $userId): array
     {
         global $wpdb;
         $table = self::table();
 
+        /** @var list<TrustSignalRow>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT wallet_address, chain, role, trust_boost, fraud_reduction,
                     contract_address, meta, last_synced
@@ -443,13 +491,107 @@ class SignalRepository
 
         $signals = [];
         foreach ($rows as $row) {
-            $decoded = json_decode($row->meta ?: '{}', true) ?: [];
-            $row->nft_collections = $decoded['nft_collections'] ?? [];
-            $row->wallet_role     = $row->role;
-            $signals[$row->chain] = $row;
+            $decorated            = self::decorateTrustSignal($row);
+            $signals[$row->chain] = $decorated;
         }
 
         return $signals;
+    }
+
+    /**
+     * Decorate a trust-signal row with parsed meta fields (nft_collections, wallet_role).
+     * Builds a fresh stdClass so callers receive every SQL column plus the two
+     * decoration props.
+     *
+     * ARCHITECTURAL NOTE (tracked debt): this is the plugin's weakest type boundary.
+     * The returned stdClass shape is implicit — PHPStan cannot statically verify
+     * that `nft_collections` / `wallet_role` are present, and external consumers
+     * (currently bcc-trust-engine via WalletSignalWriteInterface) read both.
+     * A shared cross-plugin DTO (e.g. \BCC\Core\DTO\TrustSignalDTO) should replace
+     * this pattern once the same problem is solved for TrendingDataInterface —
+     * the shape is genuinely identical there. Until then, any consumer that
+     * reads `wallet_role` outside the enum {pending, none, operator, creator,
+     * holder, …} must treat it defensively.
+     *
+     * @param TrustSignalRow $row
+     */
+    private static function decorateTrustSignal(object $row): \stdClass
+    {
+        // Guard rail: the SQL shape declared TrustSignalRow as always having these
+        // columns. If a future schema change drops one, (array)$row would produce
+        // an array without the key, which array_merge silently covers with the
+        // merged defaults — masking the drift. Fail fast instead of producing
+        // corrupted trust data.
+        $rowArr = (array) $row;
+        foreach (['wallet_address', 'chain', 'role', 'meta'] as $required) {
+            if (!array_key_exists($required, $rowArr)) {
+                throw new \LogicException(
+                    "SignalRepository::decorateTrustSignal: required column '{$required}' missing from row — schema drift?"
+                );
+            }
+        }
+
+        /** @var array<string, mixed> $decoded */
+        $decoded = json_decode($row->meta ?: '{}', true) ?: [];
+
+        $rawCollections = $decoded['nft_collections'] ?? [];
+        $nftCollections = [];
+        if (is_array($rawCollections)) {
+            $total = count($rawCollections);
+            foreach ($rawCollections as $collection) {
+                if (is_array($collection)) {
+                    $nftCollections[] = $collection;
+                }
+            }
+            $dropped = $total - count($nftCollections);
+            if ($dropped > 0) {
+                self::reportCollectionDropsOnce($row->wallet_address, $row->chain, $total, count($nftCollections));
+            }
+        }
+
+        $rawRole    = $decoded['role'] ?? $row->role;
+        $walletRole = is_string($rawRole) ? $rawRole : $row->role;
+
+        return (object) array_merge($rowArr, [
+            'nft_collections' => $nftCollections,
+            'wallet_role'     => $walletRole,
+        ]);
+    }
+
+    /**
+     * Rate-limited reporter for malformed nft_collections drops.
+     *
+     * A single bad meta blob typically contains multiple malformed entries, and a
+     * hot trust-score path will decode the same row on every request. Without
+     * dedup we'd emit one log line per bad entry per request — easily hundreds of
+     * lines per minute per corrupted wallet. Throttle to one log line per
+     * (wallet, chain) per 15 minutes; the `kept`/`total` counts in the payload
+     * still reveal the scale of the drop.
+     */
+    private static function reportCollectionDropsOnce(
+        string $walletAddress,
+        string $chain,
+        int $total,
+        int $kept
+    ): void {
+        if (!class_exists('\\BCC\\Core\\Log\\Logger')) {
+            return;
+        }
+
+        // md5 keeps the transient key short and free of address-format edge cases
+        // (cosmos addresses can exceed the safe transient-key length on some hosts).
+        $dedupKey = 'bcc_sig_drop_' . md5($chain . '|' . strtolower($walletAddress));
+        if (get_transient($dedupKey) !== false) {
+            return;
+        }
+        set_transient($dedupKey, 1, 15 * MINUTE_IN_SECONDS);
+
+        \BCC\Core\Log\Logger::warning('[SignalRepository] dropped malformed nft_collections entries', [
+            'wallet' => $walletAddress,
+            'chain'  => $chain,
+            'total'  => $total,
+            'kept'   => $kept,
+        ]);
     }
 
     /**

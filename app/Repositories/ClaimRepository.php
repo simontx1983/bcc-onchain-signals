@@ -13,6 +13,54 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-type ClaimRow object{
+ *     id: string,
+ *     user_id: string,
+ *     entity_type: string,
+ *     entity_id: string,
+ *     wallet_address: string,
+ *     chain_id: string,
+ *     claim_role: string,
+ *     status: string,
+ *     verified_at: string|null,
+ *     created_at: string
+ * }
+ *
+ * @phpstan-type ClaimWithClaimer object{
+ *     id: string,
+ *     user_id: string,
+ *     entity_type: string,
+ *     entity_id: string,
+ *     wallet_address: string,
+ *     chain_id: string,
+ *     claim_role: string,
+ *     status: string,
+ *     verified_at: string|null,
+ *     created_at: string,
+ *     claimer_name: string
+ * }
+ *
+ * @phpstan-type ClaimPublic object{
+ *     id: string,
+ *     user_id: string,
+ *     entity_type: string,
+ *     entity_id: string,
+ *     chain_id: string,
+ *     claim_role: string,
+ *     status: string,
+ *     verified_at: string|null,
+ *     created_at: string,
+ *     claimer_name: string,
+ *     wallet_address?: string
+ * }
+ *
+ * @phpstan-type ClaimByPageRow object{
+ *     page_id: string,
+ *     claimer_name: string,
+ *     claim_role: string
+ * }
+ */
 class ClaimRepository {
 
     /** @var string Explicit column list — must match schema-claims.php. */
@@ -54,11 +102,13 @@ class ClaimRepository {
             current_time('mysql', true)
         ));
 
-        // Capture rows_affected immediately — before any other query can overwrite it.
+        // Capture rows_affected AND last_error immediately — both are
+        // connection-global state that any intervening query would overwrite.
         // INSERT = 1, UPDATE (changed) = 2, UPDATE (no-op) = 0.
-        $inserted = ((int) $wpdb->rows_affected === 1);
+        $inserted  = ((int) $wpdb->rows_affected === 1);
+        $lastError = (string) $wpdb->last_error;
 
-        if ($wpdb->last_error) {
+        if ($lastError !== '') {
             return false;
         }
 
@@ -74,12 +124,22 @@ class ClaimRepository {
      * Get the verified primary claim (exclusive role) for an entity.
      * Returns the single operator/creator claim if one exists, or null.
      * Uses idx_entity index: (entity_type, entity_id).
+     *
+     * SECURITY-CRITICAL: This is the exclusivity gate for operator/creator
+     * claims. If a DB error returns null, treating it as "no claim exists"
+     * would let a second user bypass exclusivity while the advisory lock
+     * is held. On DB error we throw so createExclusiveClaim() fails closed
+     * rather than granting a collision-free claim on stale/empty state.
+     *
+     * @return ClaimWithClaimer|null
+     * @throws \RuntimeException When the query errors (fail-closed).
      */
     public static function getPrimaryClaim(string $entityType, int $entityId, string $role): ?object {
         global $wpdb;
         $table = self::table();
 
-        return $wpdb->get_row($wpdb->prepare(
+        /** @var ClaimWithClaimer|null $row */
+        $row = $wpdb->get_row($wpdb->prepare(
             "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address,
                     cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
                     u.display_name AS claimer_name
@@ -92,6 +152,22 @@ class ClaimRepository {
             $entityId,
             $role
         ));
+
+        // wpdb::get_row() returns null for BOTH "no row" and "DB error" — the only
+        // way to distinguish is $wpdb->last_error, which is connection-GLOBAL state.
+        // We snapshot it IMMEDIATELY here; any unrelated query that fires between
+        // this point and the check (e.g. a shutdown handler, an autoloader touching
+        // the DB, or a cache-miss triggering another query) would clobber it and
+        // mask the real error. Do not insert code between these two lines.
+        $lastError = (string) $wpdb->last_error;
+
+        if ($row === null && $lastError !== '') {
+            throw new \RuntimeException(
+                'ClaimRepository::getPrimaryClaim DB error: ' . $lastError
+            );
+        }
+
+        return $row;
     }
 
     /**
@@ -101,7 +177,7 @@ class ClaimRepository {
      * Pass $includeWalletAddress = true only when the caller needs it
      * (e.g. admin views).
      *
-     * @return object[] Array of claim objects with user display_name.
+     * @return list<ClaimPublic> Array of claim objects with user display_name.
      */
     public static function getForEntity(string $entityType, int $entityId, bool $includeWalletAddress = false): array {
         global $wpdb;
@@ -109,7 +185,8 @@ class ClaimRepository {
 
         $walletCol = $includeWalletAddress ? ', cl.wallet_address' : '';
 
-        return $wpdb->get_results($wpdb->prepare(
+        /** @var list<ClaimPublic>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id{$walletCol},
                     cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
                     u.display_name AS claimer_name
@@ -121,15 +198,20 @@ class ClaimRepository {
             $entityType,
             $entityId
         ));
+
+        return $rows ?: [];
     }
 
     /**
      * Get a user's claim on a specific entity (if any).
+     *
+     * @return ClaimRow|null
      */
     public static function getUserClaim(int $userId, string $entityType, int $entityId): ?object {
         global $wpdb;
         $table = self::table();
 
+        /** @var ClaimRow|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE user_id = %d AND entity_type = %s AND entity_id = %d",
@@ -182,10 +264,11 @@ class ClaimRepository {
             ...array_merge($pageIds, $pageIds)
         );
 
+        /** @var list<ClaimByPageRow>|null $rows */
         $rows = $wpdb->get_results($sql);
 
         $map = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             // First primary claim wins per page (operator > creator by query order).
             if (!isset($map[(int) $row->page_id])) {
                 $map[(int) $row->page_id] = $row->claimer_name;
@@ -201,7 +284,7 @@ class ClaimRepository {
      *
      * @param string $entityType 'validator' or 'collection'
      * @param int[]  $entityIds
-     * @return array<int, object[]> entity_id => array of claim objects
+     * @return array<int, list<ClaimWithClaimer>> entity_id => array of claim objects
      */
     public static function getForEntityBatch(string $entityType, array $entityIds): array {
         if (empty($entityIds)) {
@@ -212,6 +295,7 @@ class ClaimRepository {
         $table = self::table();
         $ph    = implode(',', array_fill(0, count($entityIds), '%d'));
 
+        /** @var list<ClaimWithClaimer>|null $rows */
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT cl.id, cl.user_id, cl.entity_type, cl.entity_id, cl.wallet_address,
                     cl.chain_id, cl.claim_role, cl.status, cl.verified_at, cl.created_at,
@@ -226,7 +310,7 @@ class ClaimRepository {
         ));
 
         $map = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $map[(int) $row->entity_id][] = $row;
         }
 
@@ -245,7 +329,7 @@ class ClaimRepository {
      * this advisory lock (not via a DB UNIQUE KEY, which would also
      * block non-exclusive holder claims).
      *
-     * @return array{success: bool, claim_id?: int, error?: string, message?: string}
+     * @return array{success: true, claim_id: int}|array{success: false, message: string, error?: string}
      */
     public static function createExclusiveClaim(
         int $userId,
@@ -263,6 +347,9 @@ class ClaimRepository {
 
         try {
             // Under lock: check if anyone already holds this exclusive role.
+            // getPrimaryClaim() THROWS on DB error — we deliberately let it propagate
+            // to the outer catch so the lock releases and the user sees a transient
+            // failure, rather than silently granting a claim on empty result.
             $existingPrimary = self::getPrimaryClaim($entityType, $entityId, $role);
 
             if ($existingPrimary) {
@@ -287,6 +374,20 @@ class ClaimRepository {
             }
 
             return ['success' => true, 'claim_id' => $upsertResult['id']];
+        } catch (\RuntimeException $e) {
+            // Fail closed: if the exclusivity check itself errored, do not grant a claim.
+            if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[ClaimRepository] exclusive claim aborted on DB error', [
+                    'entity_type' => $entityType,
+                    'entity_id'   => $entityId,
+                    'role'        => $role,
+                    'error'       => $e->getMessage(),
+                ]);
+            }
+            return [
+                'success' => false,
+                'message' => 'Temporary database error — please try again in a moment.',
+            ];
         } finally {
             LockRepository::release($lockKey);
         }

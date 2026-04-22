@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -18,19 +19,24 @@ use BCC\Onchain\Support\ApiRetry;
  *   GET /thorchain/node/{addr}  — single node
  *
  * Bond amounts are in 1e8 base units (1 RUNE = 100,000,000).
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 class ThorchainFetcher implements FetcherInterface
 {
+    /** @var ChainRow */
     private object $chain;
     private string $base_url;
     private int    $timeout = 20;
 
+    /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
         $this->base_url = rtrim($chain->rest_url ?? 'https://thornode.ninerealms.com', '/');
     }
 
+    /** @return ChainRow */
     public function get_chain(): object
     {
         return $this->chain;

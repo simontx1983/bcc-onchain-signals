@@ -23,6 +23,8 @@ if (!defined('ABSPATH')) {
  *  4. CRUD: list, set-primary, disconnect
  *
  * Signature verification delegates to \BCC\Core\Crypto\WalletVerifier.
+ *
+ * @phpstan-import-type WalletWithChain from WalletRepository
  */
 class WalletController
 {
@@ -324,11 +326,15 @@ class WalletController
 
         if (!$is_owner && !$is_admin) {
             // Strip wallet_address for non-owners.
-            return rest_ensure_response(array_map(function (object $w): array {
-                $fields = self::projectWalletFields($w);
-                unset($fields['wallet_address']);
-                return $fields;
-            }, $wallets));
+            return rest_ensure_response(array_map(
+                /** @param WalletWithChain $w */
+                static function (object $w): array {
+                    $fields = self::projectWalletFields($w);
+                    unset($fields['wallet_address']);
+                    return $fields;
+                },
+                $wallets
+            ));
         }
 
         return rest_ensure_response(array_map([self::class, 'projectWalletFields'], $wallets));
@@ -337,6 +343,7 @@ class WalletController
     /**
      * Strip internal IDs (user_id, chain_id, post_id) from wallet REST responses.
      *
+     * @param WalletWithChain $w
      * @return array<string, mixed>
      */
     private static function projectWalletFields(object $w): array

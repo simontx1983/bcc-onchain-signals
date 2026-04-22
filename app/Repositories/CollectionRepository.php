@@ -8,6 +8,107 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-type CollectionRow object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     contract_address: string,
+ *     chain_id: string,
+ *     collection_name: string|null,
+ *     token_standard: string|null,
+ *     total_supply: string|null,
+ *     floor_price: string|null,
+ *     floor_currency: string|null,
+ *     unique_holders: string|null,
+ *     total_volume: string|null,
+ *     listed_percentage: string|null,
+ *     royalty_percentage: string|null,
+ *     metadata_storage: string|null,
+ *     image_url: string|null,
+ *     show_on_profile: string,
+ *     fetched_at: string,
+ *     expires_at: string
+ * }
+ *
+ * @phpstan-type CollectionWithChain object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     contract_address: string,
+ *     chain_id: string,
+ *     collection_name: string|null,
+ *     token_standard: string|null,
+ *     total_supply: string|null,
+ *     floor_price: string|null,
+ *     floor_currency: string|null,
+ *     unique_holders: string|null,
+ *     total_volume: string|null,
+ *     listed_percentage: string|null,
+ *     royalty_percentage: string|null,
+ *     metadata_storage: string|null,
+ *     image_url: string|null,
+ *     show_on_profile: string,
+ *     fetched_at: string,
+ *     expires_at: string,
+ *     chain_slug: string,
+ *     chain_name: string,
+ *     explorer_url: string|null,
+ *     native_token: string|null
+ * }
+ *
+ * @phpstan-type CollectionIdWithChain object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     contract_address: string,
+ *     chain_id: string,
+ *     collection_name: string|null,
+ *     token_standard: string|null,
+ *     total_supply: string|null,
+ *     floor_price: string|null,
+ *     unique_holders: string|null,
+ *     total_volume: string|null,
+ *     chain_slug: string,
+ *     chain_type: string
+ * }
+ *
+ * @phpstan-type CollectionCountByChain object{
+ *     chain_id: string,
+ *     cnt: string,
+ *     last_fetched: string|null
+ * }
+ *
+ * Display shape consumed by CollectionService::enrichWithBadges() and mergeWithManual().
+ * Superset of CollectionWithChain plus UI decoration props populated post-fetch.
+ * Decoration props are optional because repository rows start without them.
+ *
+ * @phpstan-type CollectionDisplay object{
+ *     id: string|null,
+ *     wallet_link_id?: string|null,
+ *     contract_address: string,
+ *     chain_id?: string,
+ *     collection_name: string|null,
+ *     token_standard: string|null,
+ *     total_supply: string|int|null,
+ *     floor_price: string|float|null,
+ *     floor_currency: string|null,
+ *     unique_holders: string|int|null,
+ *     total_volume: string|float|null,
+ *     listed_percentage: string|float|null,
+ *     royalty_percentage: string|float|null,
+ *     metadata_storage: string|null,
+ *     image_url?: string|null,
+ *     show_on_profile: int|string,
+ *     fetched_at: string|null,
+ *     expires_at?: string,
+ *     chain_slug: string,
+ *     chain_name: string,
+ *     explorer_url: string|null,
+ *     native_token: string|null,
+ *     is_creator?: bool,
+ *     viewer_holds?: bool,
+ *     data_source?: string,
+ *     can_toggle?: bool
+ * }
+ */
 final class CollectionRepository
 {
     /** @var string Explicit column list — must match schema-collections.php. */
@@ -154,7 +255,7 @@ final class CollectionRepository
      * Each chain type is ranked independently — no cross-chain mixing.
      *
      * @param string $chainType One of: 'evm', 'solana', 'cosmos'.
-     * @return array{items: object[], total: int, pages: int}
+     * @return array{items: list<CollectionWithChain>, total: int, pages: int}
      */
     public static function getTopCollectionsByChainType(
         string $chainType,
@@ -198,6 +299,7 @@ final class CollectionRepository
         );
 
         $total = (int) $wpdb->get_var($countSql);
+        /** @var list<CollectionWithChain>|null $items */
         $items = $wpdb->get_results($mainSql);
 
         return [
@@ -210,7 +312,7 @@ final class CollectionRepository
     /**
      * @param bool $includeHidden If true, returns all collections regardless of show_on_profile.
      *                            Used by the page owner's dashboard. Public views pass false.
-     * @return array{items: object[], total: int, pages: int}
+     * @return array{items: list<CollectionWithChain>, total: int, pages: int}
      */
     public static function getForProject(int $postId, int $page = 1, int $perPage = 8, string $orderBy = 'total_volume', bool $includeHidden = false): array
     {
@@ -233,6 +335,7 @@ final class CollectionRepository
             $postId
         ));
 
+        /** @var list<CollectionWithChain>|null $items */
         $items = $wpdb->get_results($wpdb->prepare(
             "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id, c.collection_name,
                     c.token_standard, c.total_supply, c.floor_price, c.floor_currency,
@@ -333,6 +436,8 @@ final class CollectionRepository
 
     /**
      * Load a collection with chain metadata. Used by ClaimService.
+     *
+     * @return CollectionIdWithChain|null
      */
     public static function getByIdWithChain(int $collectionId): ?object
     {
@@ -340,6 +445,7 @@ final class CollectionRepository
         $table  = self::table();
         $chains = ChainRepository::table();
 
+        /** @var CollectionIdWithChain|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT c.id, c.wallet_link_id, c.contract_address, c.chain_id,
                     c.collection_name, c.token_standard, c.total_supply,
@@ -396,16 +502,19 @@ final class CollectionRepository
         return $result !== false;
     }
 
-    /** @return object[] */
+    /** @return list<CollectionRow> */
     public static function getExpired(int $limit = 50): array
     {
         global $wpdb;
         $table = self::table();
 
-        return $wpdb->get_results($wpdb->prepare(
+        /** @var list<CollectionRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table} WHERE expires_at < NOW() ORDER BY expires_at ASC LIMIT %d",
             $limit
         ));
+
+        return $rows ?: [];
     }
 
     /**
@@ -427,18 +536,20 @@ final class CollectionRepository
      * Get collection counts grouped by chain_id.
      * Used by the admin Chains page to show per-chain stats.
      *
-     * @return array<int, object> Keyed by chain_id, each with ->cnt and ->last_fetched.
+     * @return array<int, CollectionCountByChain> Keyed by chain_id, each with ->cnt and ->last_fetched.
      */
     public static function getCountsByChain(): array
     {
         $cached = wp_cache_get('collection_counts_by_chain', 'bcc_onchain');
         if (is_array($cached)) {
+            /** @var array<int, CollectionCountByChain> $cached */
             return $cached;
         }
 
         global $wpdb;
         $table = self::table();
 
+        /** @var list<CollectionCountByChain>|null $rows */
         $rows = $wpdb->get_results(
             "SELECT chain_id, COUNT(*) AS cnt,
                     MAX(fetched_at) AS last_fetched

@@ -2,6 +2,8 @@
 
 namespace BCC\Onchain\Contracts;
 
+use BCC\Onchain\Repositories\ChainRepository;
+
 if (!defined('ABSPATH')) {
     exit;
 }
@@ -10,6 +12,8 @@ if (!defined('ABSPATH')) {
  * Contract for all chain-specific data fetchers.
  * Each driver (EVM, Cosmos, Solana) implements this interface
  * and declares which features it supports.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 interface FetcherInterface
 {
@@ -49,7 +53,7 @@ interface FetcherInterface
     /**
      * Get the chain object this fetcher is configured for.
      *
-     * @return object Chain row from wp_bcc_chains.
+     * @return ChainRow Chain row from wp_bcc_chains.
      */
     public function get_chain(): object;
 }

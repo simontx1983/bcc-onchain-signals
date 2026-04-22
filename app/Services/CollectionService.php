@@ -13,6 +13,8 @@ use BCC\Onchain\Repositories\CollectionRepository;
  *
  * Wraps CollectionRepository with object-cache (Redis when available)
  * so repeated reads within a request or across requests are free.
+ *
+ * @phpstan-import-type CollectionDisplay from CollectionRepository
  */
 final class CollectionService
 {
@@ -79,10 +81,10 @@ final class CollectionService
      *   ->is_creator    bool  True if the page owner created/deployed this collection.
      *   ->viewer_holds  bool  True if the viewing user holds NFTs from this collection.
      *
-     * @param object[] $items     Collection item objects (from getForProject).
+     * @param list<CollectionDisplay> $items     Collection item objects (from getForProject).
      * @param int      $ownerId   Page owner user ID (creator badge).
      * @param int      $viewerId  Current viewer user ID (holder badge). 0 = logged out.
-     * @return object[] Same items with badge flags added.
+     * @return list<\stdClass> Same items with badge flags added.
      */
     public static function enrichWithBadges(array $items, int $ownerId, int $viewerId = 0): array
     {
@@ -129,20 +131,24 @@ final class CollectionService
             }
         }
 
+        $decorated = [];
         foreach ($items as $item) {
             $addr     = strtolower($item->contract_address ?? '');
             $entityId = (int) ($item->id ?? 0);
 
-            // Creator: only true if the page owner has a verified "creator" claim.
-            $item->is_creator = isset($ownerClaims[$entityId]);
-
-            // Holder: the viewer has a wallet that interacted with this contract
-            $item->viewer_holds = ($viewerId && $viewerId !== $ownerId)
-                ? ($viewerHoldings[$addr] ?? false)
+            $viewerHolds = ($viewerId && $viewerId !== $ownerId)
+                ? (bool) ($viewerHoldings[$addr] ?? false)
                 : false;
+
+            $decorated[] = self::buildCollectionDisplay(array_merge((array) $item, [
+                // Creator: only true if the page owner has a verified "creator" claim.
+                'is_creator'   => isset($ownerClaims[$entityId]),
+                // Holder: the viewer has a wallet that interacted with this contract
+                'viewer_holds' => $viewerHolds,
+            ]));
         }
 
-        return $items;
+        return $decorated;
     }
 
     /**
@@ -158,9 +164,9 @@ final class CollectionService
      *   ->collection_name, ->contract_address, ->data_source ('onchain'|'self-reported')
      *   On-chain items retain all DB columns. Self-reported items have ACF subfield values.
      *
-     * @param object[] $onchainItems  Items from CollectionService::getForProject() (objects).
+     * @param list<CollectionDisplay> $onchainItems  Items from CollectionService::getForProject() (objects).
      * @param array<int, array<string, mixed>> $manualRows    ACF repeater rows (assoc arrays from get_field()).
-     * @return object[] Merged list of stdClass objects.
+     * @return list<\stdClass> Merged list of stdClass objects.
      */
     public static function mergeWithManual(array $onchainItems, array $manualRows): array
     {
@@ -171,6 +177,7 @@ final class CollectionService
         // Also index by address-only as fallback for manual rows that don't
         // specify a chain (the common case — most manual entries omit chain).
         $onchainIndex = [];
+        $merged       = [];
         foreach ($onchainItems as $item) {
             $addr      = strtolower(trim($item->contract_address ?? ''));
             $chainSlug = strtolower(trim($item->chain_slug ?? ''));
@@ -180,10 +187,10 @@ final class CollectionService
                 }
                 $onchainIndex[$addr] = true;
             }
-            $item->data_source = 'onchain';
+            $merged[] = self::buildCollectionDisplay(array_merge((array) $item, [
+                'data_source' => 'onchain',
+            ]));
         }
-
-        $merged = $onchainItems;
 
         // Walk manual rows — only add if NOT already covered by on-chain.
         // Manual rows store chain as a display name or network post ID,
@@ -203,11 +210,11 @@ final class CollectionService
             }
 
             // Convert manual ACF row to object with same shape for the renderer
-            $manual = (object) [
+            $merged[] = self::buildCollectionDisplay([
                 'id'                 => null,
-                'contract_address'   => $row['collection_contract_address'] ?? '',
-                'collection_name'    => $row['collection_name'] ?? '',
-                'chain_name'         => $row['collection_chain'] ?? '',
+                'contract_address'   => (string) ($row['collection_contract_address'] ?? ''),
+                'collection_name'    => isset($row['collection_name']) ? (string) $row['collection_name'] : null,
+                'chain_name'         => (string) ($row['collection_chain'] ?? ''),
                 'chain_slug'         => '',
                 'explorer_url'       => '',
                 'native_token'       => '',
@@ -226,9 +233,7 @@ final class CollectionService
                 'is_creator'         => true,
                 'viewer_holds'       => false,
                 'can_toggle'         => false,
-            ];
-
-            $merged[] = $manual;
+            ]);
         }
 
         return $merged;
@@ -277,5 +282,19 @@ final class CollectionService
     private static function ttl(): int
     {
         return (int) apply_filters('bcc_onchain_collection_cache_ttl', self::DEFAULT_TTL);
+    }
+
+    /**
+     * Build a decorated collection row as a stdClass. PHPStan cannot narrow
+     * `(object) array` to a declared shape, so this factory returns the
+     * native stdClass produced by the cast. Display-layer consumers treat
+     * every property (SQL columns + is_creator / viewer_holds / data_source /
+     * can_toggle) as nullable.
+     *
+     * @param array<string, mixed> $data
+     */
+    private static function buildCollectionDisplay(array $data): \stdClass
+    {
+        return (object) $data;
     }
 }

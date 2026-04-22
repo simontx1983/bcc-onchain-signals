@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -17,18 +18,30 @@ use BCC\Onchain\Support\ApiRetry;
  * created by an address, then enriches with supply and holder data.
  *
  * Requires BCC_ETHERSCAN_API_KEY defined in wp-config.php.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
+ *
+ * @phpstan-type EtherscanNftTransfer object{
+ *     from?: string,
+ *     to?: string,
+ *     contractAddress?: string,
+ *     tokenName?: string
+ * }
  */
 class EvmFetcher implements FetcherInterface
 {
     private const HTTP_TIMEOUT = 12;
 
+    /** @var ChainRow */
     private object $chain;
 
+    /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain = $chain;
     }
 
+    /** @return ChainRow */
     public function get_chain(): object
     {
         return $this->chain;
@@ -94,14 +107,15 @@ class EvmFetcher implements FetcherInterface
         $zero      = '0x0000000000000000000000000000000000000000';
 
         foreach ($transfers as $tx) {
-            $contract = strtolower($tx->contractAddress ?? '');
+            $contractAddress = $tx->contractAddress ?? '';
+            $contract        = strtolower($contractAddress);
             if (!$contract) {
                 continue;
             }
 
             if (!isset($contracts[$contract])) {
                 $contracts[$contract] = [
-                    'contract_address' => $tx->contractAddress,
+                    'contract_address' => $contractAddress,
                     'collection_name'  => $tx->tokenName ?? null,
                     'token_standard'   => 'ERC-721',
                     'mint_count'       => 0,
@@ -285,7 +299,7 @@ class EvmFetcher implements FetcherInterface
 
     /**
      * @param array<string, mixed> $params
-     * @return object[]|null
+     * @return list<EtherscanNftTransfer>|null
      */
     private function etherscanGet(string $apiBase, array $params): ?array
     {
@@ -311,7 +325,8 @@ class EvmFetcher implements FetcherInterface
             return null;
         }
 
-        if (isset($json->status) && $json->status === '1' && is_array($json->result)) {
+        if (is_object($json) && isset($json->status) && $json->status === '1' && isset($json->result) && is_array($json->result)) {
+            /** @var list<EtherscanNftTransfer> */
             return $json->result;
         }
 

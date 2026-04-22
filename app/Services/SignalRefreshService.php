@@ -233,7 +233,12 @@ final class SignalRefreshService
             update_option('bcc_onchain_refresh_offset', $offset, false);
 
             if (!wp_next_scheduled('bcc_onchain_refresh_batch')) {
-                wp_schedule_single_event(time() + 30, 'bcc_onchain_refresh_batch');
+                \BCC\Core\Cron\AsyncDispatcher::scheduleSingle(
+                    time() + 30,
+                    'bcc_onchain_refresh_batch',
+                    [],
+                    'bcc-onchain'
+                );
             }
         } else {
             // All pages processed — clean up cursor.

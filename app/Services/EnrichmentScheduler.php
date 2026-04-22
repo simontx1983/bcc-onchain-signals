@@ -26,6 +26,9 @@ use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Repositories\ValidatorRepository;
 use BCC\Onchain\Support\CircuitBreaker;
 
+/**
+ * @phpstan-import-type ValidatorRow from ValidatorRepository
+ */
 final class EnrichmentScheduler
 {
     /** @var int API call count at the start of this run (baseline for delta tracking). */
@@ -216,7 +219,7 @@ final class EnrichmentScheduler
      *   - retry_after IS NULL OR retry_after <= NOW() (not in backoff)
      *   - enrichment_attempts < MAX_ATTEMPTS (not permanently failed)
      */
-    /** @return object[] */
+    /** @return list<ValidatorRow> */
     private static function fetchBatch(): array
     {
         return ValidatorRepository::fetchEnrichmentBatch(self::MAX_ATTEMPTS, self::MAX_VALIDATORS_PER_RUN);
@@ -232,6 +235,8 @@ final class EnrichmentScheduler
      * Wraps existing CosmosFetcher::enrich_validator() — does NOT rewrite
      * the enrichment logic. Returns false if the chain/fetcher is unavailable
      * (skip, not failure).
+     *
+     * @param ValidatorRow $row
      */
     private static function enrichRow(object $row): bool
     {
@@ -278,6 +283,8 @@ final class EnrichmentScheduler
      *
      * Jitter is seeded from operator_address (same validator always gets
      * the same offset) to distribute load evenly without random drift.
+     *
+     * @param ValidatorRow $row
      */
     private static function markSuccess(object $row, int $apiCalls): void
     {
@@ -313,6 +320,8 @@ final class EnrichmentScheduler
      *
      * Does NOT update next_enrichment_at — the row stays "due" but the
      * retry_after gate prevents processing until the backoff expires.
+     *
+     * @param ValidatorRow $row
      */
     private static function markFailure(object $row, string $error): void
     {

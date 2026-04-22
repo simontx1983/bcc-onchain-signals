@@ -195,7 +195,16 @@ final class CircuitBreaker
 
     // ── Storage ─────────────────────────────────────────────────────────────
 
-    /** @return array{failures: int, opened_at: int}|null */
+    /**
+     * @return array{failures: int, opened_at: int}|null
+     *
+     * NOTE: when the cached value is present but malformed (schema drift,
+     * mid-deploy legacy keys, cache layer corruption) we return null which
+     * re-initialises the breaker. If that happens repeatedly for the SAME
+     * chain, the breaker is effectively disabled. We log once per 5-minute
+     * window per chain so repeated corruption surfaces in monitoring instead
+     * of silently eroding the protection.
+     */
     private static function getState(int $chainId): ?array
     {
         $key   = 'cb_' . $chainId;
@@ -209,7 +218,46 @@ final class CircuitBreaker
             }
         }
 
-        return is_array($value) ? $value : null;
+        if (!is_array($value) || !isset($value['failures'], $value['opened_at'])) {
+            self::reportPersistentCorruption($chainId);
+            return null;
+        }
+
+        return [
+            'failures'  => (int) $value['failures'],
+            'opened_at' => (int) $value['opened_at'],
+        ];
+    }
+
+    /**
+     * Rate-limited logger for malformed breaker state. Fires at most once per
+     * 5-minute window per chain to avoid log flooding while still surfacing
+     * persistent corruption patterns (e.g. a bad cache backend or a stuck
+     * legacy key) to operators.
+     *
+     * CAVEAT — multi-node reliability: the dedup transient lives in whatever
+     * backend WordPress is configured with. On a single node with Redis it is
+     * consistent; on a multi-node setup WITHOUT a shared persistent object
+     * cache, each node will log independently (their dedup transients are in
+     * separate options tables). That's acceptable for this signal — the goal is
+     * to surface the problem, and per-node logging actually HELPS diagnose
+     * whether only one node's cache is corrupt. If this ever needs true global
+     * dedup, move the key to a row in a small shared table.
+     */
+    private static function reportPersistentCorruption(int $chainId): void
+    {
+        $dedupKey = 'cb_corrupt_' . $chainId;
+        if (get_transient($dedupKey) !== false) {
+            return;
+        }
+        set_transient($dedupKey, 1, 5 * MINUTE_IN_SECONDS);
+
+        if (class_exists('\\BCC\\Core\\Log\\Logger')) {
+            \BCC\Core\Log\Logger::warning('[CircuitBreaker] malformed state — re-initialising', [
+                'chain_id' => $chainId,
+                'note'     => 'Repeated re-inits weaken protection. Investigate cache backend.',
+            ]);
+        }
     }
 
     /** @param array{failures: int, opened_at: int} $state */

@@ -8,6 +8,113 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+/**
+ * @phpstan-type ValidatorRow object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     operator_address: string,
+ *     chain_id: string,
+ *     moniker: string|null,
+ *     status: string,
+ *     commission_rate: string|null,
+ *     total_stake: string|null,
+ *     self_stake: string|null,
+ *     delegator_count: string|null,
+ *     uptime_30d: string|null,
+ *     jailed_count: string|null,
+ *     voting_power_rank: string|null,
+ *     fetched_at: string,
+ *     expires_at: string,
+ *     last_enriched_at: string|null,
+ *     next_enrichment_at: string|null,
+ *     retry_after: string|null,
+ *     enrichment_attempts: string
+ * }
+ *
+ * @phpstan-type ValidatorWithChain object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     operator_address: string,
+ *     chain_id: string,
+ *     moniker: string|null,
+ *     status: string,
+ *     commission_rate: string|null,
+ *     total_stake: string|null,
+ *     self_stake: string|null,
+ *     delegator_count: string|null,
+ *     uptime_30d: string|null,
+ *     jailed_count: string|null,
+ *     voting_power_rank: string|null,
+ *     fetched_at: string,
+ *     expires_at: string,
+ *     chain_slug: string,
+ *     chain_name: string,
+ *     explorer_url: string|null,
+ *     native_token: string|null
+ * }
+ *
+ * @phpstan-type ValidatorTopForProject object{
+ *     id: string,
+ *     operator_address: string,
+ *     chain_id: string,
+ *     moniker: string|null,
+ *     status: string,
+ *     commission_rate: string|null,
+ *     total_stake: string|null,
+ *     self_stake: string|null,
+ *     delegator_count: string|null,
+ *     uptime_30d: string|null,
+ *     jailed_count: string|null,
+ *     voting_power_rank: string|null,
+ *     fetched_at: string,
+ *     chain_slug: string,
+ *     chain_name: string
+ * }
+ *
+ * @phpstan-type ValidatorAggregateStats object{
+ *     chains_count: string,
+ *     active_count: string|null,
+ *     total_stake: string,
+ *     total_delegators: string
+ * }
+ *
+ * @phpstan-type ValidatorIdWithChain object{
+ *     id: string,
+ *     wallet_link_id: string|null,
+ *     operator_address: string,
+ *     chain_id: string,
+ *     moniker: string|null,
+ *     status: string,
+ *     commission_rate: string|null,
+ *     total_stake: string|null,
+ *     self_stake: string|null,
+ *     delegator_count: string|null,
+ *     uptime_30d: string|null,
+ *     jailed_count: string|null,
+ *     voting_power_rank: string|null,
+ *     chain_slug: string,
+ *     chain_type: string
+ * }
+ *
+ * @phpstan-type ValidatorBulkExistingRow object{
+ *     id: string,
+ *     operator_address: string,
+ *     moniker: string|null,
+ *     status: string,
+ *     commission_rate: string|null,
+ *     total_stake: string|null,
+ *     jailed_count: string|null,
+ *     voting_power_rank: string|null,
+ *     enrichment_attempts: string,
+ *     fetched_at: string
+ * }
+ *
+ * @phpstan-type ValidatorCountByChain object{
+ *     chain_id: string,
+ *     cnt: string,
+ *     last_fetched: string|null
+ * }
+ */
 final class ValidatorRepository
 {
     /** @var string Explicit column list — must match schema-validators.php. */
@@ -184,6 +291,7 @@ final class ValidatorRepository
 
         // ── Step 1: fetch existing rows for this chain in one query ──────
         $chainId = (int) $validators[0]['chain_id'];
+        /** @var list<ValidatorBulkExistingRow>|null $existingRows */
         $existingRows = $wpdb->get_results($wpdb->prepare(
             "SELECT id, operator_address, moniker, status, commission_rate,
                     total_stake, jailed_count, voting_power_rank,
@@ -194,7 +302,7 @@ final class ValidatorRepository
         ));
 
         $existing = [];
-        foreach ($existingRows as $row) {
+        foreach ($existingRows ?: [] as $row) {
             $existing[$row->operator_address] = $row;
         }
 
@@ -339,7 +447,7 @@ final class ValidatorRepository
     }
 
     /**
-     * @return array{items: object[], total: int, pages: int}
+     * @return array{items: list<ValidatorWithChain>, total: int, pages: int}
      */
     public static function getForProject(int $postId, int $page = 1, int $perPage = 8, string $orderBy = 'total_stake'): array
     {
@@ -364,6 +472,7 @@ final class ValidatorRepository
             $postId
         ));
 
+        /** @var list<ValidatorWithChain>|null $items */
         $items = $wpdb->get_results($wpdb->prepare(
             "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
                     v.status, v.commission_rate, v.total_stake, v.self_stake,
@@ -394,7 +503,7 @@ final class ValidatorRepository
      * @param string      $orderBy
      * @param int|null    $chainId    Filter by chain.
      * @param string|null $timeWindow Filter by fetched_at window: '1h','6h','12h','1d','7d','30d'. Null = all.
-     * @return array{items: object[], total: int, pages: int}
+     * @return array{items: list<ValidatorWithChain>, total: int, pages: int}
      */
     public static function getTopValidators(int $page = 1, int $perPage = 20, string $orderBy = 'total_stake', ?int $chainId = null, ?string $timeWindow = null, ?string $direction = null): array
     {
@@ -449,6 +558,7 @@ final class ValidatorRepository
             ? (int) $wpdb->get_var($countSql)
             : (int) $wpdb->get_var($wpdb->prepare($countSql, ...$countParams));
 
+        /** @var list<ValidatorWithChain>|null $items */
         $items = $wpdb->get_results($wpdb->prepare($mainSql, ...$mainParams));
 
         return [
@@ -463,7 +573,7 @@ final class ValidatorRepository
     /**
      * Aggregate validator stats for a project page.
      *
-     * @return object|null  Object with chains_count, active_count, total_stake, total_delegators.
+     * @return ValidatorAggregateStats|null
      */
     public static function getAggregateStatsForProject(int $postId): ?object
     {
@@ -471,6 +581,7 @@ final class ValidatorRepository
         $table   = self::table();
         $wallets = WalletRepository::table();
 
+        /** @var ValidatorAggregateStats|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT
                 COUNT(*)                                          AS chains_count,
@@ -486,6 +597,8 @@ final class ValidatorRepository
 
     /**
      * Top validator by total_stake for a project page.
+     *
+     * @return ValidatorTopForProject|null
      */
     public static function getTopValidatorForProject(int $postId): ?object
     {
@@ -494,6 +607,7 @@ final class ValidatorRepository
         $wallets = WalletRepository::table();
         $chains  = ChainRepository::table();
 
+        /** @var ValidatorTopForProject|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT v.id, v.operator_address, v.chain_id, v.moniker, v.status,
                     v.commission_rate, v.total_stake, v.self_stake, v.delegator_count,
@@ -511,6 +625,8 @@ final class ValidatorRepository
 
     /**
      * Load a validator with chain metadata. Used by ClaimService.
+     *
+     * @return ValidatorIdWithChain|null
      */
     public static function getByIdWithChain(int $validatorId): ?object
     {
@@ -518,6 +634,7 @@ final class ValidatorRepository
         $table  = self::table();
         $chains = ChainRepository::table();
 
+        /** @var ValidatorIdWithChain|null */
         return $wpdb->get_row($wpdb->prepare(
             "SELECT v.id, v.wallet_link_id, v.operator_address, v.chain_id, v.moniker,
                     v.status, v.commission_rate, v.total_stake, v.self_stake,
@@ -558,14 +675,15 @@ final class ValidatorRepository
     /**
      * Fetch the next batch of validators due for enrichment.
      *
-     * @return object[]
+     * @return list<ValidatorRow>
      */
     public static function fetchEnrichmentBatch(int $maxAttempts, int $limit): array
     {
         global $wpdb;
         $table = self::table();
 
-        return $wpdb->get_results($wpdb->prepare(
+        /** @var list<ValidatorRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE (next_enrichment_at IS NULL OR next_enrichment_at <= NOW())
                AND (retry_after IS NULL OR retry_after <= NOW())
@@ -582,7 +700,9 @@ final class ValidatorRepository
              LIMIT %d",
             $maxAttempts,
             $limit
-        )) ?: [];
+        ));
+
+        return $rows ?: [];
     }
 
     /**
@@ -632,26 +752,29 @@ final class ValidatorRepository
     /**
      * Get active validators for a chain. Admin enrichment use.
      *
-     * @return object[]
+     * @return list<ValidatorRow>
      */
     public static function getActiveForChain(int $chainId, int $limit = 500): array
     {
         global $wpdb;
         $table = self::table();
 
-        return $wpdb->get_results($wpdb->prepare(
+        /** @var list<ValidatorRow>|null $rows */
+        $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT " . self::COLUMNS . " FROM {$table}
              WHERE chain_id = %d AND status != 'inactive'
              ORDER BY total_stake DESC
              LIMIT %d",
             $chainId, $limit
-        )) ?: [];
+        ));
+
+        return $rows ?: [];
     }
 
     /**
      * Get validator counts grouped by chain_id. Admin page summary.
      *
-     * @return array<int, object>  Keyed by chain_id. Each has cnt, last_fetched.
+     * @return array<int, ValidatorCountByChain>  Keyed by chain_id. Each has cnt, last_fetched.
      */
     public static function getCountsByChain(): array
     {
@@ -659,10 +782,12 @@ final class ValidatorRepository
         $table = self::table();
 
         $cached = wp_cache_get('counts_by_chain', 'bcc_onchain_validators');
-        if ($cached !== false) {
+        if (is_array($cached)) {
+            /** @var array<int, ValidatorCountByChain> $cached */
             return $cached;
         }
 
+        /** @var list<ValidatorCountByChain>|null $rows */
         $rows = $wpdb->get_results(
             "SELECT chain_id, COUNT(*) AS cnt,
                     MAX(fetched_at) AS last_fetched

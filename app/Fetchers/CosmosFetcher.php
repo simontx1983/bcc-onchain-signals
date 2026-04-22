@@ -19,9 +19,12 @@ use BCC\Onchain\Support\Bech32;
  *
  * NFT collections: Cosmos SDK chains may have CW-721 NFTs (e.g. Stargaze)
  * but no standardized LCD endpoint exists for discovery. Returns empty.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 class CosmosFetcher implements FetcherInterface
 {
+    /** @var ChainRow */
     private object $chain;
     private string $rest_url;
     private int    $decimals;
@@ -35,13 +38,16 @@ class CosmosFetcher implements FetcherInterface
      */
     private static array $validatorListCache = [];
 
+    /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
-        $this->rest_url = rtrim($chain->rest_url ?? $chain->rpc_url, '/');
+        $rest           = $chain->rest_url ?? $chain->rpc_url;
+        $this->rest_url = rtrim($rest ?? '', '/');
         $this->decimals = (int) ($chain->decimals ?? 6);
     }
 
+    /** @return ChainRow */
     public function get_chain(): object
     {
         return $this->chain;

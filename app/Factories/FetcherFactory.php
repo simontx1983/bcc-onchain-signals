@@ -19,6 +19,8 @@ use BCC\Onchain\Repositories\ChainRepository;
  * Chain Fetcher Factory
  *
  * Resolves chain_id → chain_type → driver class.
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 class FetcherFactory
 {
@@ -59,6 +61,7 @@ class FetcherFactory
     /**
      * Create a fetcher from a chain object.
      *
+     * @param ChainRow $chain
      * @throws \InvalidArgumentException If no driver exists for this chain type.
      */
     public static function make_for_chain(object $chain): FetcherInterface
@@ -70,8 +73,12 @@ class FetcherFactory
         }
 
         // Validate external URLs to prevent SSRF against internal hosts.
-        foreach (['rpc_url', 'rest_url', 'explorer_url'] as $urlField) {
-            $url = $chain->$urlField ?? '';
+        $urls = [
+            'rpc_url'      => $chain->rpc_url ?? '',
+            'rest_url'     => $chain->rest_url ?? '',
+            'explorer_url' => $chain->explorer_url ?? '',
+        ];
+        foreach ($urls as $urlField => $url) {
             if ($url !== '' && !self::isExternalUrl($url)) {
                 throw new \InvalidArgumentException("Blocked internal/invalid URL in {$urlField} for chain: {$chain->slug}");
             }
@@ -83,6 +90,7 @@ class FetcherFactory
             throw new \InvalidArgumentException("Fetcher driver class not loaded: {$class}");
         }
 
+        /** @var FetcherInterface */
         return new $class($chain);
     }
 

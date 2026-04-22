@@ -325,12 +325,13 @@ class SignalFetcher
 
     /**
      * @param array<string, mixed> $params
-     * @return object[]|null
+     * @return list<\stdClass>|null
      */
     private static function etherscanRequest(array $params): ?array
     {
         $raw = self::etherscanRequestRaw($params);
-        if ($raw && isset($raw->status) && $raw->status === '1' && is_array($raw->result)) {
+        if ($raw !== null && isset($raw->status) && $raw->status === '1' && isset($raw->result) && is_array($raw->result)) {
+            /** @var list<\stdClass> */
             return $raw->result;
         }
         return null;

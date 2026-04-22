@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -16,19 +17,24 @@ use BCC\Onchain\Support\ApiRetry;
  * Endpoint: https://polkadot.api.subscan.io
  *
  * Subscan returns stake in Plancks (1 DOT = 1e10 Plancks).
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 class PolkadotFetcher implements FetcherInterface
 {
+    /** @var ChainRow */
     private object $chain;
     private string $base_url;
     private int    $timeout = 20;
 
+    /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain    = $chain;
         $this->base_url = rtrim($chain->rest_url ?? 'https://polkadot.api.subscan.io', '/');
     }
 
+    /** @return ChainRow */
     public function get_chain(): object
     {
         return $this->chain;

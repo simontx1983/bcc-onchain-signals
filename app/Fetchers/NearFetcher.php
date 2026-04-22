@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 }
 
 use BCC\Onchain\Contracts\FetcherInterface;
+use BCC\Onchain\Repositories\ChainRepository;
 use BCC\Onchain\Support\ApiRetry;
 
 /**
@@ -17,19 +18,24 @@ use BCC\Onchain\Support\ApiRetry;
  *
  * Stake amounts are in yoctoNEAR (1 NEAR = 1e24 yoctoNEAR).
  * Validator names are readable pool IDs (e.g. "astro-stakers.poolv1.near").
+ *
+ * @phpstan-import-type ChainRow from ChainRepository
  */
 class NearFetcher implements FetcherInterface
 {
+    /** @var ChainRow */
     private object $chain;
     private string $rpc_url;
     private int    $timeout = 20;
 
+    /** @param ChainRow $chain */
     public function __construct(object $chain)
     {
         $this->chain   = $chain;
         $this->rpc_url = $chain->rpc_url ?? 'https://rpc.mainnet.near.org';
     }
 
+    /** @return ChainRow */
     public function get_chain(): object
     {
         return $this->chain;
