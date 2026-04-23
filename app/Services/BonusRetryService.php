@@ -145,29 +145,47 @@ final class BonusRetryService
                 continue;
             }
 
-            // Recalculate from signals + claims (full bonus, not signals only).
-            $signalBonus = array_sum(array_column(
-                SignalRepository::get_for_page((int) $pageId),
-                'score_contribution'
-            ));
-
-            $ownerId = \BCC\Core\PeepSo\PeepSo::get_page_owner((int) $pageId);
-            $claimBonus = 0.0;
-            if ($ownerId) {
-                $claimBonus = \BCC\Onchain\Repositories\ClaimRepository::computePageClaimBonus(
-                    $walletTable,
-                    (int) $pageId,
-                    $ownerId
-                );
+            // Serialize with live recomputeAndApply() — that path acquires
+            // the same bcc_onchain_bonus_<pageId> advisory lock around its
+            // read+compute+apply sequence. Without this, a retry iteration
+            // that read signals at T0 could write an older snapshot AFTER
+            // a concurrent live recompute at T1 wrote fresher data,
+            // regressing onchain_bonus until the next trigger. On lock
+            // conflict we defer to the live path: skip this page this
+            // cycle (no attempts bump) — the queue entry stays put and we
+            // retry next tick when contention has cleared.
+            $pageIdInt = (int) $pageId;
+            if (!\BCC\Onchain\Repositories\LockRepository::acquire('bcc_onchain_bonus_' . $pageIdInt, 5)) {
+                continue;
             }
 
-            $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
-            $applied    = $contributor->applyBonus((int) $pageId, 'onchain', $totalBonus);
+            try {
+                // Recalculate from signals + claims (full bonus, not signals only).
+                $signalBonus = array_sum(array_column(
+                    SignalRepository::get_for_page($pageIdInt),
+                    'score_contribution'
+                ));
 
-            if ($applied) {
-                $succeeded[] = $pageId;
-            } else {
-                $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
+                $ownerId = \BCC\Core\PeepSo\PeepSo::get_page_owner($pageIdInt);
+                $claimBonus = 0.0;
+                if ($ownerId) {
+                    $claimBonus = \BCC\Onchain\Repositories\ClaimRepository::computePageClaimBonus(
+                        $walletTable,
+                        $pageIdInt,
+                        $ownerId
+                    );
+                }
+
+                $totalBonus = min($signalBonus + $claimBonus, BCC_ONCHAIN_MAX_TOTAL_BONUS);
+                $applied    = $contributor->applyBonus($pageIdInt, 'onchain', $totalBonus);
+
+                if ($applied) {
+                    $succeeded[] = $pageId;
+                } else {
+                    $failed[$pageId] = ($entry['attempts'] ?? 0) + 1;
+                }
+            } finally {
+                \BCC\Onchain\Repositories\LockRepository::release('bcc_onchain_bonus_' . $pageIdInt);
             }
         }
 
