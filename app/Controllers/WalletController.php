@@ -117,8 +117,11 @@ class WalletController
             wp_send_json_error(['message' => 'Missing address or signature.'], 400);
         }
 
-        // Consume the stored challenge (one-time use).
-        $challenge = WalletIdentityService::consumeChallenge($user_id, $wallet_address);
+        // Peek at the stored challenge (non-destructive) to resolve
+        // the chain metadata. The atomic consume happens inside
+        // WalletIdentityService::verifyAndLink() so the challenge
+        // cannot be used twice even if verification then fails.
+        $challenge = WalletIdentityService::peekChallenge($user_id, $wallet_address);
 
         if (!$challenge) {
             wp_send_json_error(['message' => 'Challenge not found or expired. Please try again.'], 400);
@@ -139,19 +142,20 @@ class WalletController
             wp_send_json_error(['message' => 'This wallet is already linked to another account.'], 409);
         }
 
-        // Single execution pipeline: verify signature + link wallet + fire event.
+        // Single execution pipeline: consume challenge + verify signature
+        // + link wallet + fire event. challengeMessage is sourced server-
+        // side inside verifyAndLink() — never from caller input.
         $result = WalletIdentityService::verifyAndLink(
             WalletVerificationRequest::fromArray([
-                'userId'           => $user_id,
-                'chainSlug'        => $chain->slug,
-                'chainType'        => $chain->chain_type,
-                'chainId'          => (int) $chain->id,
-                'walletAddress'    => $wallet_address,
-                'signature'        => $signature,
-                'challengeMessage' => $challenge['message'],
-                'postId'           => $post_id,
-                'walletType'       => $wallet_type,
-                'label'            => $label,
+                'userId'        => $user_id,
+                'chainSlug'     => $chain->slug,
+                'chainType'     => $chain->chain_type,
+                'chainId'       => (int) $chain->id,
+                'walletAddress' => $wallet_address,
+                'signature'     => $signature,
+                'postId'        => $post_id,
+                'walletType'    => $wallet_type,
+                'label'         => $label,
             ])
         );
 
