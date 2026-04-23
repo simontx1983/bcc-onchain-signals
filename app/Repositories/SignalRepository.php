@@ -319,17 +319,35 @@ class SignalRepository
      *
      * Called on wallet disconnect to prevent stale score_contribution
      * from lingering after the wallet link is removed.
+     *
+     * Resolves the affected user_id(s) BEFORE deletion so that the
+     * per-user signal cache is invalidated. Without this, a subsequent
+     * BonusService::recomputeAndApply read served from cache would
+     * include the just-deleted row and write an inflated onchain_bonus
+     * that persists until HOUR_IN_SECONDS expiry.
      */
     public static function deleteByWallet(string $walletAddress, string $chain): int
     {
         global $wpdb;
         $table = self::table();
 
+        // Snapshot owners before delete — can't resolve them afterward.
+        /** @var list<string>|null $userIds */
+        $userIds = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT user_id FROM {$table} WHERE wallet_address = %s AND chain = %s",
+            $walletAddress,
+            $chain
+        ));
+
         $deleted = $wpdb->query($wpdb->prepare(
             "DELETE FROM {$table} WHERE wallet_address = %s AND chain = %s",
             $walletAddress,
             $chain
         ));
+
+        foreach ($userIds ?: [] as $uid) {
+            self::invalidateUser((int) $uid);
+        }
 
         return max(0, (int) $deleted);
     }

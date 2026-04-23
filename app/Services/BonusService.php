@@ -60,25 +60,51 @@ final class BonusService
      * Handle wallet disconnect: revoke claims for the wallet and recalculate bonuses.
      *
      * Extracted from the boot file closure so business logic lives in a service.
+     *
+     * Atomicity: the claim delete and signal delete MUST commit together.
+     * Under DB latency spikes (200-500ms), a PHP timeout between the two
+     * deletes would leave claims revoked but signals intact — yielding an
+     * inflated onchain_bonus that only self-heals on the next signal refresh
+     * (up to 24h later). Both deletes run inside a single transaction;
+     * recomputeAndApply runs AFTER commit because it takes an advisory lock
+     * and calls the trust-engine, neither of which belong inside a DB txn.
      */
     public static function handleWalletDisconnect(int $userId, string $chainSlug, string $walletAddress): void
     {
+        global $wpdb;
+
         // Resolve chain_id so deletion is scoped to the specific chain.
         // Prevents collateral deletion of claims on other chains sharing
         // the same address format (e.g., Ethereum + Polygon + Arbitrum).
         $chainId = \BCC\Onchain\Repositories\ChainRepository::resolveId($chainSlug);
 
-        // Remove claims tied to this wallet address ON THIS CHAIN ONLY.
-        $deleted = \BCC\Onchain\Repositories\ClaimRepository::deleteByUserAndWallet($userId, $walletAddress, $chainId);
+        $wpdb->query('START TRANSACTION');
+        try {
+            // Remove claims tied to this wallet address ON THIS CHAIN ONLY.
+            $deleted = \BCC\Onchain\Repositories\ClaimRepository::deleteByUserAndWallet($userId, $walletAddress, $chainId);
 
-        // Delete signal rows for the disconnected wallet so stale scores
-        // don't persist. Without this, the daily cron won't refresh a wallet
-        // that's no longer linked, and its score_contribution lingers forever.
-        SignalRepository::deleteByWallet($walletAddress, $chainSlug);
+            // Delete signal rows for the disconnected wallet so stale scores
+            // don't persist. Without this, the daily cron won't refresh a wallet
+            // that's no longer linked, and its score_contribution lingers forever.
+            SignalRepository::deleteByWallet($walletAddress, $chainSlug);
+
+            $wpdb->query('COMMIT');
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            if (class_exists('BCC\\Core\\Log\\Logger')) {
+                \BCC\Core\Log\Logger::error('[bcc-onchain] handleWalletDisconnect rolled back', [
+                    'user_id' => $userId,
+                    'chain'   => $chainSlug,
+                    'error'   => $e->getMessage(),
+                ]);
+            }
+            throw $e;
+        }
 
         // Recalculate the on-chain bonus with the claims AND signals removed.
         // Must include BOTH signal scores AND remaining claim bonuses
         // (from other wallets the user still has connected).
+        // Idempotent: if anything below fails, the next refresh recomputes.
         $pageId = \BCC\Core\ServiceLocator::resolvePageOwnerResolver()->getPageForOwner($userId);
         if ($pageId) {
             self::recomputeAndApply($pageId, $userId);

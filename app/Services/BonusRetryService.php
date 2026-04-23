@@ -277,30 +277,44 @@ final class BonusRetryService
      * Prune quarantine entries older than 14 days and cap at 100 rows.
      *
      * Call from a daily cron hook to prevent unbounded growth.
+     *
+     * Holds LOCK_KEY around the read-modify-write to prevent a
+     * concurrent quarantine() call from having its newly-added entry
+     * clobbered by our update_option with a filtered-but-stale snapshot
+     * (classic lost-update race). LOCK_KEY is the same advisory lock
+     * that queue() / clear() / quarantine() all use, so writers serialize.
      */
     public static function pruneQuarantine(): void
     {
-        /** @var array<int, array{bonus: float, queued_at: int, attempts: int, quarantined_at: int}> $quarantined */
-        $quarantined = get_option(self::QUARANTINE_KEY, []);
-
-        if (empty($quarantined)) {
-            return;
+        if (!\BCC\Onchain\Repositories\LockRepository::acquire(self::LOCK_KEY, 5)) {
+            return; // Contention — daily cron will retry tomorrow.
         }
 
-        $cutoff  = time() - (14 * DAY_IN_SECONDS);
-        $pruned  = array_filter(
-            $quarantined,
-            static fn(array $entry): bool => $entry['quarantined_at'] >= $cutoff
-        );
+        try {
+            /** @var array<int, array{bonus: float, queued_at: int, attempts: int, quarantined_at: int}> $quarantined */
+            $quarantined = get_option(self::QUARANTINE_KEY, []);
 
-        // Cap at 100 entries — keep the most recent by quarantined_at.
-        if (count($pruned) > 100) {
-            uasort($pruned, static fn(array $a, array $b): int => $b['quarantined_at'] <=> $a['quarantined_at']);
-            $pruned = array_slice($pruned, 0, 100, true);
-        }
+            if (empty($quarantined)) {
+                return;
+            }
 
-        if (count($pruned) !== count($quarantined)) {
-            update_option(self::QUARANTINE_KEY, $pruned, false);
+            $cutoff  = time() - (14 * DAY_IN_SECONDS);
+            $pruned  = array_filter(
+                $quarantined,
+                static fn(array $entry): bool => $entry['quarantined_at'] >= $cutoff
+            );
+
+            // Cap at 100 entries — keep the most recent by quarantined_at.
+            if (count($pruned) > 100) {
+                uasort($pruned, static fn(array $a, array $b): int => $b['quarantined_at'] <=> $a['quarantined_at']);
+                $pruned = array_slice($pruned, 0, 100, true);
+            }
+
+            if (count($pruned) !== count($quarantined)) {
+                update_option(self::QUARANTINE_KEY, $pruned, false);
+            }
+        } finally {
+            \BCC\Onchain\Repositories\LockRepository::release(self::LOCK_KEY);
         }
     }
 }
