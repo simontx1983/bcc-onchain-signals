@@ -99,7 +99,14 @@ final class EnrichmentScheduler
             foreach ($batch as $row) {
                 // Budget check BEFORE starting work on this validator.
                 // Uses delta from baseline to ignore concurrent indexer calls.
-                $apiUsed = self::getApiCount() - self::$apiBaseline;
+                //
+                // max(0, …) floor: if the wp_cache counter TTL expired
+                // mid-run (LOCK_TTL ~600s but run can approach it under
+                // slow APIs) and got reset to 0, the raw subtraction
+                // goes negative and the budget check becomes a no-op,
+                // allowing the run to process past MAX_API_CALLS_PER_RUN.
+                // Clamp so a reset-counter forces us to stop, not skip.
+                $apiUsed = max(0, self::getApiCount() - self::$apiBaseline);
                 if ($apiUsed >= self::MAX_API_CALLS_PER_RUN) {
                     $result['stopped_reason'] = 'api_budget';
                     self::log("Scheduler: API budget reached ({$apiUsed} calls). Stopping.");
@@ -134,7 +141,7 @@ final class EnrichmentScheduler
                 $processed++;
             }
 
-            $result['api_calls'] = self::getApiCount() - self::$apiBaseline;
+            $result['api_calls'] = max(0, self::getApiCount() - self::$apiBaseline);
 
         } finally {
             self::releaseLock();

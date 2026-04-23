@@ -28,7 +28,13 @@ final class CircuitBreaker
     const FAILURE_THRESHOLD = 5;            // Consecutive failures to trip
     const COOLDOWN_SECONDS  = 300;          // 5 minutes before half-open probe
     const CACHE_GROUP       = 'bcc_circuit';
-    const CACHE_TTL         = 1800;         // 30 min TTL (auto-expire stale state)
+    // 6-hour TTL: long-running batch cron jobs (10k+ pages) can exceed the
+    // previous 30-min TTL mid-run, causing an OPEN breaker to silently return
+    // to CLOSED in the same cron tick because its cached state expired. The
+    // TTL only needs to outlast the longest batch run; breaker state is
+    // authoritatively reset by recordSuccess() so a longer TTL does not
+    // extend actual cooldowns — it just prevents premature amnesia.
+    const CACHE_TTL         = 21600;        // 6 hours
 
     /**
      * Check if the circuit breaker is OPEN for a chain.
@@ -74,6 +80,13 @@ final class CircuitBreaker
                 'opened_at' => 0,
             ]);
         }
+
+        // Also reset the atomic counter used by recordFailure() so the
+        // two tracking mechanisms stay in sync. Without this, a success
+        // would clear the state-struct but leave the wp_cache_incr
+        // counter at its pre-success value, and the next failure would
+        // increment from that stale value instead of 1.
+        wp_cache_set('counter:' . $chainId, 0, self::CACHE_GROUP, self::CACHE_TTL);
 
         // Track last successful fetch time (persists across cache flushes)
         update_option('bcc_onchain_last_success_' . $chainId, time(), false);
@@ -145,9 +158,26 @@ final class CircuitBreaker
      */
     public static function recordFailure(int $chainId): void
     {
-        $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
-        $failures = (int) ($state['failures'] ?? 0) + 1;
+        // Atomic counter via wp_cache_incr — closes the get→compute→set
+        // lost-update race. Under a parallel failure storm two workers
+        // could both read failures=4 and both write failures=5, missing
+        // an increment; the circuit stayed closed longer than designed,
+        // burning more API budget (and risking IP bans from providers).
+        $counterKey = 'counter:' . $chainId;
 
+        // Ensure the counter exists before incrementing; wp_cache_incr
+        // returns false on a missing key in some drop-ins.
+        wp_cache_add($counterKey, 0, self::CACHE_GROUP, self::CACHE_TTL);
+        $failures = wp_cache_incr($counterKey, 1, self::CACHE_GROUP);
+        if (!is_int($failures) || $failures <= 0) {
+            // Backend degraded — fall back to read-modify-write so we at
+            // least record SOMETHING. Still better than silently dropping
+            // the failure signal.
+            $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
+            $failures = (int) ($state['failures'] ?? 0) + 1;
+        }
+
+        $state    = self::getState($chainId) ?? ['failures' => 0, 'opened_at' => 0];
         $openedAt = (int) ($state['opened_at'] ?? 0);
         if ($failures >= self::FAILURE_THRESHOLD && $openedAt === 0) {
             $openedAt = time();

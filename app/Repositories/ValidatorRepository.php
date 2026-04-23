@@ -279,6 +279,22 @@ final class ValidatorRepository
             return $stats;
         }
 
+        // Contract enforcement: bulkUpsert expects a single-chain batch.
+        // A mixed-chain batch would only load existing rows for the first
+        // element's chain_id (next query), so validators from any other
+        // chain would appear "new" → duplicate INSERTs / UNIQUE key collisions.
+        // Fail loudly instead of silently corrupting the table.
+        $chainIds = [];
+        foreach ($validators as $v) {
+            $chainIds[(int) ($v['chain_id'] ?? 0)] = true;
+        }
+        if (count($chainIds) !== 1 || isset($chainIds[0])) {
+            throw new \LogicException(
+                'ValidatorRepository::bulkUpsert requires a single-chain batch; got chain_ids=['
+                . implode(',', array_keys($chainIds)) . ']'
+            );
+        }
+
         // How often to touch fetched_at on unchanged rows (observability).
         // Every 6 hours keeps the "last seen" timestamp useful for dead
         // validator detection without writing on every 4-hour index cycle.
@@ -291,13 +307,18 @@ final class ValidatorRepository
 
         // ── Step 1: fetch existing rows for this chain in one query ──────
         $chainId = (int) $validators[0]['chain_id'];
+        // Bounded SELECT — the architectural guardrail requires every
+        // SELECT to be bounded. 10000 is far above realistic bonded-set
+        // sizes (Cosmos chains cap ~200; larger chains cap ~500 via LCD
+        // paging) and protects against runaway memory on future chains.
         /** @var list<ValidatorBulkExistingRow>|null $existingRows */
         $existingRows = $wpdb->get_results($wpdb->prepare(
             "SELECT id, operator_address, moniker, status, commission_rate,
                     total_stake, jailed_count, voting_power_rank,
                     enrichment_attempts, fetched_at
              FROM {$table}
-             WHERE chain_id = %d",
+             WHERE chain_id = %d
+             LIMIT 10000",
             $chainId
         ));
 
@@ -442,6 +463,13 @@ final class ValidatorRepository
             $wpdb->query('ROLLBACK');
             throw $e;
         }
+
+        // Invalidate the 1-hour getCountsByChain cache so the partial-fetch
+        // detector in ChainRefreshService::index_validators reads fresh
+        // counts on the next cycle. Without this, a stale count caused
+        // false-positive partial-fetch warnings right after a healthy
+        // bulkUpsert added new validators.
+        wp_cache_delete('counts_by_chain', 'bcc_onchain_validators');
 
         return $stats;
     }

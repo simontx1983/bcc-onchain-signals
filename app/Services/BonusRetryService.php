@@ -182,13 +182,34 @@ final class BonusRetryService
             $current = get_option(self::OPTION_KEY, []);
 
             foreach ($succeeded as $pageId) {
-                unset($current[$pageId]);
+                // Only unset if the entry still references the same snapshot
+                // we just processed. A queue() call between snapshot and
+                // write-back replaces the entry with fresh data; keep it.
+                $snapshot = $pending[$pageId] ?? null;
+                if (isset($current[$pageId])
+                    && $snapshot !== null
+                    && ($current[$pageId]['queued_at'] ?? 0) === ($snapshot['queued_at'] ?? -1)
+                ) {
+                    unset($current[$pageId]);
+                }
             }
             foreach ($exhausted as $pageId) {
-                unset($current[$pageId]);
+                $snapshot = $pending[$pageId] ?? null;
+                if (isset($current[$pageId])
+                    && $snapshot !== null
+                    && ($current[$pageId]['queued_at'] ?? 0) === ($snapshot['queued_at'] ?? -1)
+                ) {
+                    unset($current[$pageId]);
+                }
             }
             foreach ($failed as $pageId => $attempts) {
-                if (isset($current[$pageId])) {
+                $snapshot = $pending[$pageId] ?? null;
+                // Only stamp attempts if the queue entry is the same one we
+                // just processed — prevents clobbering a fresh re-queue.
+                if (isset($current[$pageId])
+                    && $snapshot !== null
+                    && ($current[$pageId]['queued_at'] ?? 0) === ($snapshot['queued_at'] ?? -1)
+                ) {
                     $current[$pageId]['attempts'] = $attempts;
                 }
             }

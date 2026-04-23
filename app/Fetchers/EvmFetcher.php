@@ -286,15 +286,31 @@ class EvmFetcher implements FetcherInterface
         }
 
         $parsed = parse_url($explorerUrl);
-        $host   = $parsed['host'] ?? '';
+        $host   = strtolower($parsed['host'] ?? '');
 
-        // etherscan.io → api.etherscan.io
-        if (str_contains($host, 'etherscan.io')) {
-            return 'https://api.etherscan.io/api';
+        // SSRF-hardening: only derive api-bases for allow-listed explorer hosts.
+        // A DB row with a malicious `explorer_url` would otherwise exfiltrate
+        // the Etherscan API key via query string to an attacker-controlled host.
+        static $allowlist = [
+            'etherscan.io'    => 'https://api.etherscan.io/api',
+            'polygonscan.com' => 'https://api.polygonscan.com/api',
+            'arbiscan.io'     => 'https://api.arbiscan.io/api',
+            'basescan.org'    => 'https://api.basescan.org/api',
+            'bscscan.com'     => 'https://api.bscscan.com/api',
+            'optimistic.etherscan.io' => 'https://api-optimistic.etherscan.io/api',
+            'snowtrace.io'    => 'https://api.snowtrace.io/api',
+        ];
+
+        // Strict suffix match against allowlist (prevents `etherscan.io.attacker.com`).
+        foreach ($allowlist as $allowedHost => $apiBase) {
+            if ($host === $allowedHost || str_ends_with($host, '.' . $allowedHost)) {
+                return $apiBase;
+            }
         }
 
-        // *scan.com (polygonscan, arbiscan, basescan, bscscan, etc.)
-        return 'https://api.' . $host . '/api';
+        // Unknown host — fall back to Etherscan default rather than constructing
+        // an api.<user-controlled>.<tld>/api URL.
+        return 'https://api.etherscan.io/api';
     }
 
     /**

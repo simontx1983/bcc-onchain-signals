@@ -105,6 +105,16 @@ final class WalletRepository
         );
     }
 
+    /**
+     * Delete all wallet links owned by a user (full account cleanup).
+     */
+    public static function deleteForUser(int $userId): void
+    {
+        global $wpdb;
+        $table = self::table();
+        $wpdb->delete($table, ['user_id' => $userId], ['%d']);
+    }
+
     public static function setPrimary(int $walletLinkId, int $userId): bool
     {
         global $wpdb;

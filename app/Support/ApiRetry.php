@@ -114,9 +114,21 @@ final class ApiRetry
                         CircuitBreaker::recordFailure($chainId);
                     }
 
-                    // Do NOT sleep — return immediately. The markFailure() path
-                    // already writes retry_after to the DB, which is the backoff
-                    // mechanism. Sleeping in a cron loop can exceed PHP max_execution_time.
+                    // Retryable: exhaust attempts before returning the failure.
+                    if ($attempt < $maxRetries) {
+                        $attempt++;
+                        $delay = min(
+                            self::DEFAULT_BACKOFF_MAX,
+                            (int) (self::DEFAULT_BACKOFF_BASE * ($attempt ** self::BACKOFF_MULTIPLIER))
+                        );
+                        // Cap cron-context sleep at 3s so we cannot exceed typical
+                        // per-job budgets even at max_retries=3.
+                        $delay = min($delay, 3);
+                        if ($delay > 0) {
+                            sleep($delay);
+                        }
+                        continue;
+                    }
                     return $lastResponse;
                 }
 
@@ -126,6 +138,14 @@ final class ApiRetry
                         'CLIENT ERROR (%d) %s — not retrying',
                         $code, $label
                     ));
+                    // Budget fairness: charge failed requests against the
+                    // per-chain budget too. Previously only 2xx responses
+                    // counted, so a chain that 404'd every call consumed
+                    // zero budget while still being scheduled repeatedly
+                    // — starving healthy chains of their fair share.
+                    if ($chainId > 0 && class_exists('\\BCC\\Onchain\\Services\\EnrichmentScheduler')) {
+                        \BCC\Onchain\Services\EnrichmentScheduler::trackApiCall($chainId);
+                    }
                     return $lastResponse;
                 }
 
@@ -144,9 +164,19 @@ final class ApiRetry
                 CircuitBreaker::recordFailure($chainId);
             }
 
-            // Do NOT sleep — return immediately. The caller's retry_after
-            // DB column is the backoff mechanism. Sleeping blocks the PHP
-            // process for up to 90s in cron context, risking timeout kills.
+            // Retryable: exhaust attempts before returning the failure.
+            if ($attempt < $maxRetries) {
+                $attempt++;
+                $delay = min(
+                    self::DEFAULT_BACKOFF_MAX,
+                    (int) (self::DEFAULT_BACKOFF_BASE * ($attempt ** self::BACKOFF_MULTIPLIER))
+                );
+                $delay = min($delay, 3);
+                if ($delay > 0) {
+                    sleep($delay);
+                }
+                continue;
+            }
             break;
         }
 

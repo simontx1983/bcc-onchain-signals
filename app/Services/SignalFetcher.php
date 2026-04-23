@@ -89,7 +89,17 @@ class SignalFetcher
         };
 
         if ( $result !== null ) {
-            set_transient( $cache_key, $result, 6 * HOUR_IN_SECONDS );
+            // Align this transient's TTL with the canonical DB cache
+            // (BCC_ONCHAIN_CACHE_HOURS, typically 24h) so the two layers
+            // cannot disagree. Previously 6h here vs 24h in the DB
+            // meant SignalRepository::get_cached returned 24h-old rows
+            // AFTER this transient expired, while an admin "force
+            // refresh" that deleted only this transient still saw the
+            // stale DB row short-circuit the fetch path.
+            $ttl = defined('BCC_ONCHAIN_CACHE_HOURS')
+                ? (int) BCC_ONCHAIN_CACHE_HOURS * HOUR_IN_SECONDS
+                : 6 * HOUR_IN_SECONDS;
+            set_transient( $cache_key, $result, $ttl );
             self::recordChainHealth($chain, true);
         } else {
             self::recordChainHealth($chain, false);

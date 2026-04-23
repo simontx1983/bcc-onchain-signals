@@ -424,6 +424,16 @@ class ClaimRepository {
     }
 
     /**
+     * Delete all claims for a user (full account cleanup).
+     */
+    public static function deleteForUser(int $userId): void
+    {
+        global $wpdb;
+        $table = self::table();
+        $wpdb->delete($table, ['user_id' => $userId], ['%d']);
+    }
+
+    /**
      * Compute the total claim bonus for a page across ALL entity types.
      *
      * Aggregates validator AND collection claims. Wallet-linked entities are

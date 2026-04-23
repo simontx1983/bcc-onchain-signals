@@ -39,7 +39,7 @@ if ( ! defined( 'BCC_CORE_VERSION' ) ) {
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────
-define('BCC_ONCHAIN_VERSION', '1.0.0');
+define('BCC_ONCHAIN_VERSION', '1.1.0');
 define('BCC_ONCHAIN_PATH', plugin_dir_path(__FILE__));
 define('BCC_ONCHAIN_URL', plugin_dir_url(__FILE__));
 
@@ -135,9 +135,37 @@ if (file_exists($bcc_onchain_autoload)) {
 }
 
 // ── Schema migration: re-run table creation when plugin version changes ─
+//
+// Guarded by an advisory lock so two concurrent requests hitting
+// plugins_loaded during a plugin update cannot both execute dbDelta
+// simultaneously — dbDelta is NOT idempotent under concurrency and
+// can emit "duplicate column name" errors that leave one worker's
+// request half-migrated.
 add_action('plugins_loaded', function (): void {
     $stored = get_option('bcc_onchain_schema_version', '');
-    if ($stored !== BCC_ONCHAIN_VERSION) {
+    if ($stored === BCC_ONCHAIN_VERSION) {
+        return;
+    }
+
+    if (class_exists('\\BCC\\Core\\DB\\AdvisoryLock')) {
+        if (!\BCC\Core\DB\AdvisoryLock::acquire('bcc_onchain_schema_migrate', 0)) {
+            return; // Another worker is migrating; it will bump the version.
+        }
+        try {
+            // Re-check under the lock — first winner updates the version,
+            // subsequent lock-holders exit immediately.
+            $stored = get_option('bcc_onchain_schema_version', '');
+            if ($stored === BCC_ONCHAIN_VERSION) {
+                return;
+            }
+            bcc_onchain_ensure_schema();
+            update_option('bcc_onchain_schema_version', BCC_ONCHAIN_VERSION, false);
+        } finally {
+            \BCC\Core\DB\AdvisoryLock::release('bcc_onchain_schema_migrate');
+        }
+    } else {
+        // bcc-core missing — fall through without lock; admin notice on
+        // line 30 already warns that bcc-core must be active first.
         bcc_onchain_ensure_schema();
         update_option('bcc_onchain_schema_version', BCC_ONCHAIN_VERSION, false);
     }
@@ -250,15 +278,11 @@ add_action('plugins_loaded', function (): void {
     ChainRefreshService::init();
     WalletController::init();
 
-    // ── Redact API keys from WordPress http_api_debug logs ───────────────
-    // Priority 1: redact API keys before any other http_api_debug handler
-    // can see the full URL. Default priority (10) leaked keys to earlier hooks.
-    add_action('http_api_debug', function ($response, $context, $transport, $args, $url): void {
-        // If the URL contains an API key, redact it before any downstream logging
-        if (is_string($url) && strpos($url, 'apikey=') !== false) {
-            $url = preg_replace('/apikey=[^&]+/', 'apikey=REDACTED', $url);
-        }
-    }, 1, 5);
+    // Intentionally NO http_api_debug handler — it is an action, not a filter,
+    // and $url is passed by value. Any mutation would be local-scope-only and
+    // discarded before downstream listeners (Query Monitor, log shippers) see
+    // the event. Redaction MUST happen at call sites, not here. Callers log
+    // sanitised URLs directly (see EvmFetcher::etherscanGet error path).
 
     // ── Cron hooks ──────────────────────────────────────────────────────────
     add_action('bcc_onchain_daily_refresh',  [SignalRefreshService::class, 'dailyRefresh']);
@@ -308,17 +332,9 @@ add_action('plugins_loaded', function (): void {
 
     // ── User deletion: clean up wallet links, signals, and claims ─────────
     add_action('delete_user', function (int $userId): void {
-        // Delete wallet links (user_id is the owner).
-        global $wpdb;
-        $walletTable = \BCC\Onchain\Repositories\WalletRepository::table();
-        $wpdb->delete($walletTable, ['user_id' => $userId], ['%d']);
-
-        // Delete onchain signals (raw metrics + trust scoring data).
+        \BCC\Onchain\Repositories\WalletRepository::deleteForUser($userId);
         \BCC\Onchain\Repositories\SignalRepository::deleteForUser($userId);
-
-        // Delete entity claims.
-        $claimTable = \BCC\Onchain\Repositories\ClaimRepository::table();
-        $wpdb->delete($claimTable, ['user_id' => $userId], ['%d']);
+        \BCC\Onchain\Repositories\ClaimRepository::deleteForUser($userId);
     }, 10, 1);
 
     // ── REST API ────────────────────────────────────────────────────────────
@@ -436,6 +452,13 @@ function bcc_onchain_ensure_schema(): void {
     bcc_onchain_create_validators_table();
     bcc_onchain_create_collections_table();
     bcc_onchain_create_claims_table();
+
+    // Signals table is owned by SignalRepository; included here so its
+    // column-type migrations (FLOAT → DECIMAL) run on version bump, not
+    // only on fresh activation.
+    if (class_exists('\\BCC\\Onchain\\Repositories\\SignalRepository')) {
+        \BCC\Onchain\Repositories\SignalRepository::install_own_table();
+    }
 }
 
 

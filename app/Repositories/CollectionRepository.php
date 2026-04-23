@@ -195,6 +195,13 @@ final class CollectionRepository
         $now       = current_time('mysql', true);
         $count     = 0;
 
+        // Transaction wrapper: without this, a PHP timeout or fatal
+        // mid-loop left the top-collections list partially updated
+        // (first N rows current-cycle, remaining N from hours earlier).
+        // Mirrors ValidatorRepository::bulkUpsert's atomicity guarantee.
+        $wpdb->query('START TRANSACTION');
+
+        try {
         foreach ($collections as $data) {
             // Build the row manually so NULLs stay NULL in the DB
             // (wpdb::prepare with %d/%f converts null to 0).
@@ -245,6 +252,12 @@ final class CollectionRepository
             if ($result !== false) {
                 $count++;
             }
+        }
+
+        $wpdb->query('COMMIT');
+        } catch (\Throwable $e) {
+            $wpdb->query('ROLLBACK');
+            throw $e;
         }
 
         return $count;

@@ -53,6 +53,11 @@ class SignalRepository
         $charset = $wpdb->get_charset_collate();
         $table   = self::table();
 
+        // score_contribution / trust_boost use DECIMAL so arithmetic in SUM()
+        // and comparison against BCC_ONCHAIN_MAX_TOTAL_BONUS is exact — FLOAT
+        // lost precision past ~7 significant digits and caused 19.9999999
+        // vs 20.0000001 inconsistencies at the cap boundary, which directly
+        // affects trust-score correctness (fail-fast rule).
         $sql = "CREATE TABLE {$table} (
             id               BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             user_id          BIGINT UNSIGNED NOT NULL,
@@ -62,11 +67,11 @@ class SignalRepository
             first_tx_at      DATETIME                 DEFAULT NULL,
             tx_count         INT UNSIGNED    NOT NULL DEFAULT 0,
             contract_count   INT UNSIGNED    NOT NULL DEFAULT 0,
-            score_contribution FLOAT         NOT NULL DEFAULT 0,
+            score_contribution DECIMAL(6,2)  NOT NULL DEFAULT 0,
             raw_data         LONGTEXT                 DEFAULT NULL,
             fetched_at       DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
             role             VARCHAR(20)     NOT NULL DEFAULT 'pending',
-            trust_boost      FLOAT           NOT NULL DEFAULT 0,
+            trust_boost      DECIMAL(6,2)    NOT NULL DEFAULT 0,
             fraud_reduction  INT             NOT NULL DEFAULT 0,
             contract_address VARCHAR(128)             DEFAULT NULL,
             meta             TEXT                     DEFAULT NULL,
@@ -91,11 +96,31 @@ class SignalRepository
         if (!$has_role) {
             $wpdb->query("ALTER TABLE {$table}
                 ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'pending' AFTER fetched_at,
-                ADD COLUMN trust_boost FLOAT NOT NULL DEFAULT 0 AFTER role,
+                ADD COLUMN trust_boost DECIMAL(6,2) NOT NULL DEFAULT 0 AFTER role,
                 ADD COLUMN fraud_reduction INT NOT NULL DEFAULT 0 AFTER trust_boost,
                 ADD COLUMN contract_address VARCHAR(128) DEFAULT NULL AFTER fraud_reduction,
                 ADD COLUMN meta TEXT DEFAULT NULL AFTER contract_address,
                 ADD COLUMN last_synced DATETIME DEFAULT NULL AFTER meta");
+        }
+
+        // Migrate existing FLOAT columns to DECIMAL on upgrade. dbDelta's
+        // column-type comparison is unreliable, so run the MODIFY COLUMN
+        // explicitly when we detect the old type.
+        $score_type = $wpdb->get_var($wpdb->prepare(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS
+             WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'score_contribution'",
+            $table
+        ));
+        if ($score_type !== null && strtolower((string) $score_type) === 'float') {
+            $wpdb->query("ALTER TABLE {$table} MODIFY COLUMN score_contribution DECIMAL(6,2) NOT NULL DEFAULT 0");
+        }
+        $boost_type = $wpdb->get_var($wpdb->prepare(
+            "SELECT DATA_TYPE FROM information_schema.COLUMNS
+             WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'trust_boost'",
+            $table
+        ));
+        if ($boost_type !== null && strtolower((string) $boost_type) === 'float') {
+            $wpdb->query("ALTER TABLE {$table} MODIFY COLUMN trust_boost DECIMAL(6,2) NOT NULL DEFAULT 0");
         }
 
         // Add trust_boost index if missing.

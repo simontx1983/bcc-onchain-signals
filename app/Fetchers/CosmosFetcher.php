@@ -456,6 +456,15 @@ class CosmosFetcher implements FetcherInterface
 
     private function tokensToDisplay(string $amount): float
     {
+        // Bigint-safe divide: string amounts can exceed PHP float precision (2^53)
+        // for 18-decimal Cosmos chains. Use BCMath when available so the divide
+        // happens on the raw string BEFORE the final float cast, preserving as
+        // many significant digits as PHP's float can hold.
+        if (function_exists('bcdiv') && preg_match('/^-?\d+$/', $amount) === 1) {
+            $divisor = bcpow('10', (string) (int) $this->decimals);
+            $display = bcdiv($amount, $divisor, 6);
+            return (float) $display;
+        }
         return round((float) $amount / pow(10, $this->decimals), 6);
     }
 
